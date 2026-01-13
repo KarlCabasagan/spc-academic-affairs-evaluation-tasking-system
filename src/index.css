@@ -1,0 +1,125 @@
+@import "tailwindcss";
+
+@theme {
+  /* Maroon Primary Color Palette */
+  --color-maroon-50: #fdf2f4;
+  --color-maroon-100: #fce7ea;
+  --color-maroon-200: #f9d0d9;
+  --color-maroon-300: #f4a9ba;
+  --color-maroon-400: #ec7694;
+  --color-maroon-500: #e04a71;
+  --color-maroon-600: #cb2a5a;
+  --color-maroon-700: #aa1e4a;
+  --color-maroon-800: #800020;
+  --color-maroon-900: #6b1a35;
+  --color-maroon-950: #3d0a1b;
+  
+  /* Status Colors */
+  --color-complied: #16a34a;
+  --color-complied-light: #dcfce7;
+  --color-not-complied: #dc2626;
+  --color-not-complied-light: #fee2e2;
+  --color-not-applicable: #6b7280;
+  --color-not-applicable-light: #f3f4f6;
+  
+  /* Typography */
+  --font-sans: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+/* Import Google Font */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+/* Base Styles */
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: #f9fafb;
+  color: #111827;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f5f9;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* Focus Ring */
+*:focus-visible {
+  outline: 2px solid #800020;
+  outline-offset: 2px;
+}
+
+/* Button Base Reset */
+button {
+  cursor: pointer;
+  font-family: inherit;
+}
+
+/* Link Reset */
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+/* Input Reset */
+input, textarea, select {
+  font-family: inherit;
+  font-size: inherit;
+}
+
+/* Animation Utilities */
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideUp {
+  from { 
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to { 
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.3s ease-out;
+}
+
+.animate-slide-up {
+  animation: slideUp 0.3s ease-out;
+}
+
+.animate-pulse {
+  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}

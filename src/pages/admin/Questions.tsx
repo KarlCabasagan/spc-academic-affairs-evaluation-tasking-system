@@ -1,0 +1,504 @@
+import { useEffect, useState } from "react";
+import type { FormEvent } from "react";
+import { useParams, Link } from "react-router-dom";
+import { supabase } from "../../lib/supabase";
+import type { Area, Question, QuestionFormData } from "../../lib/types";
+import {
+  Button,
+  Card,
+  Input,
+  Modal,
+  ConfirmDialog,
+  Loading,
+  showToast,
+} from "../../components/ui";
+
+export default function Questions() {
+  const { areaId } = useParams<{ areaId: string }>();
+
+  const [area, setArea] = useState<Area | null>(null);
+  const [questions, setQuestions] = useState<Question[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isDeleteOpen, setIsDeleteOpen] = useState(false);
+  const [selectedQuestion, setSelectedQuestion] = useState<Question | null>(
+    null
+  );
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Form state
+  const [formData, setFormData] = useState<QuestionFormData>({
+    area_id: areaId || "",
+    question_text: "",
+    question_order: 1,
+    is_required: true,
+  });
+
+  useEffect(() => {
+    if (areaId) {
+      fetchData();
+    }
+  }, [areaId]);
+
+  const fetchData = async () => {
+    try {
+      // Fetch area
+      const { data: areaData, error: areaError } = await supabase
+        .from("areas")
+        .select("*")
+        .eq("id", areaId)
+        .single();
+
+      if (areaError) throw areaError;
+      setArea(areaData);
+
+      // Fetch questions
+      const { data: questionsData, error: questionsError } = await supabase
+        .from("questions")
+        .select("*")
+        .eq("area_id", areaId)
+        .order("question_order", { ascending: true });
+
+      if (questionsError) throw questionsError;
+      setQuestions(questionsData || []);
+    } catch (error) {
+      console.error("Error fetching data:", error);
+      showToast("Failed to load data", "error");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const openCreateModal = () => {
+    setSelectedQuestion(null);
+    setFormData({
+      area_id: areaId || "",
+      question_text: "",
+      question_order:
+        questions.length > 0
+          ? Math.max(...questions.map((q) => q.question_order)) + 1
+          : 1,
+      is_required: true,
+    });
+    setIsModalOpen(true);
+  };
+
+  const openEditModal = (question: Question) => {
+    setSelectedQuestion(question);
+    setFormData({
+      area_id: question.area_id,
+      question_text: question.question_text,
+      question_order: question.question_order,
+      is_required: question.is_required,
+    });
+    setIsModalOpen(true);
+  };
+
+  const openDeleteDialog = (question: Question) => {
+    setSelectedQuestion(question);
+    setIsDeleteOpen(true);
+  };
+
+  const handleSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+
+    if (!formData.question_text.trim()) {
+      showToast("Please enter question text", "error");
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      if (selectedQuestion) {
+        // Update
+        const { error } = await supabase
+          .from("questions")
+          .update({
+            question_text: formData.question_text.trim(),
+            question_order: formData.question_order,
+            is_required: formData.is_required,
+          })
+          .eq("id", selectedQuestion.id);
+
+        if (error) throw error;
+        showToast("Question updated successfully", "success");
+      } else {
+        // Create
+        const { error } = await supabase.from("questions").insert({
+          area_id: areaId,
+          question_text: formData.question_text.trim(),
+          question_order: formData.question_order,
+          is_required: formData.is_required,
+        });
+
+        if (error) throw error;
+        showToast("Question created successfully", "success");
+      }
+
+      setIsModalOpen(false);
+      fetchData();
+    } catch (error) {
+      console.error("Error saving question:", error);
+      showToast("Failed to save question", "error");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!selectedQuestion) return;
+
+    setIsSubmitting(true);
+    try {
+      const { error } = await supabase
+        .from("questions")
+        .delete()
+        .eq("id", selectedQuestion.id);
+
+      if (error) throw error;
+      showToast("Question deleted successfully", "success");
+      setIsDeleteOpen(false);
+      fetchData();
+    } catch (error) {
+      console.error("Error deleting question:", error);
+      showToast("Failed to delete question", "error");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const toggleActive = async (question: Question) => {
+    try {
+      const { error } = await supabase
+        .from("questions")
+        .update({ is_active: !question.is_active })
+        .eq("id", question.id);
+
+      if (error) throw error;
+      showToast(
+        `Question ${question.is_active ? "deactivated" : "activated"}`,
+        "success"
+      );
+      fetchData();
+    } catch (error) {
+      console.error("Error toggling question:", error);
+      showToast("Failed to update question status", "error");
+    }
+  };
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center py-16">
+        <Loading size="lg" text="Loading questions..." />
+      </div>
+    );
+  }
+
+  if (!area) {
+    return (
+      <div className="text-center py-16">
+        <h2 className="text-xl font-semibold text-gray-900 mb-4">
+          Area not found
+        </h2>
+        <Link to="/admin/areas">
+          <Button>Back to Areas</Button>
+        </Link>
+      </div>
+    );
+  }
+
+  return (
+    <div className="animate-fade-in">
+      {/* Header */}
+      <div className="mb-8">
+        <Link
+          to="/admin/areas"
+          className="inline-flex items-center gap-2 text-gray-500 hover:text-maroon-800 transition-colors mb-4"
+        >
+          <svg
+            className="w-4 h-4"
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={2}
+              d="M15 19l-7-7 7-7"
+            />
+          </svg>
+          Back to Areas
+        </Link>
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+          <div className="flex items-center gap-4">
+            <div className="w-12 h-12 bg-maroon-100 text-maroon-800 rounded-xl flex items-center justify-center font-bold text-lg">
+              {area.area_number}
+            </div>
+            <div>
+              <h1 className="text-2xl sm:text-3xl font-bold text-gray-900">
+                {area.name}
+              </h1>
+              <p className="text-gray-600">
+                {questions.length} question{questions.length !== 1 ? "s" : ""}
+              </p>
+            </div>
+          </div>
+          <Button onClick={openCreateModal}>
+            <svg
+              className="w-5 h-5"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M12 4v16m8-8H4"
+              />
+            </svg>
+            Add Question
+          </Button>
+        </div>
+      </div>
+
+      {/* Questions List */}
+      {questions.length === 0 ? (
+        <Card className="text-center py-12">
+          <svg
+            className="w-16 h-16 text-gray-300 mx-auto mb-4"
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={2}
+              d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+            />
+          </svg>
+          <h3 className="text-lg font-medium text-gray-900 mb-2">
+            No questions yet
+          </h3>
+          <p className="text-gray-500 mb-6">
+            Add evaluation questions for this area.
+          </p>
+          <Button onClick={openCreateModal}>Add First Question</Button>
+        </Card>
+      ) : (
+        <div className="space-y-3">
+          {questions.map((question) => (
+            <Card
+              key={question.id}
+              className="flex flex-col sm:flex-row sm:items-start gap-4"
+            >
+              <div
+                className={`
+                w-8 h-8 rounded-lg flex items-center justify-center text-sm font-medium shrink-0
+                ${
+                  question.is_active
+                    ? "bg-maroon-100 text-maroon-800"
+                    : "bg-gray-100 text-gray-400"
+                }
+              `}
+              >
+                {question.question_order}
+              </div>
+              <div className="flex-1 min-w-0">
+                <p
+                  className={`font-medium ${
+                    question.is_active ? "text-gray-900" : "text-gray-400"
+                  }`}
+                >
+                  {question.question_text}
+                </p>
+                <div className="flex flex-wrap items-center gap-2 mt-2">
+                  {question.is_required && (
+                    <span className="px-2 py-0.5 bg-red-50 text-red-600 text-xs rounded-full">
+                      Required
+                    </span>
+                  )}
+                  {!question.is_active && (
+                    <span className="px-2 py-0.5 bg-gray-100 text-gray-500 text-xs rounded-full">
+                      Inactive
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex items-center gap-1 shrink-0">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => toggleActive(question)}
+                >
+                  {question.is_active ? (
+                    <svg
+                      className="w-4 h-4 text-gray-500"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.878 9.878L3 3m6.879 6.879L21 21"
+                      />
+                    </svg>
+                  ) : (
+                    <svg
+                      className="w-4 h-4 text-green-600"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
+                      />
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"
+                      />
+                    </svg>
+                  )}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => openEditModal(question)}
+                >
+                  <svg
+                    className="w-4 h-4"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
+                    />
+                  </svg>
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => openDeleteDialog(question)}
+                >
+                  <svg
+                    className="w-4 h-4 text-red-500"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                    />
+                  </svg>
+                </Button>
+              </div>
+            </Card>
+          ))}
+        </div>
+      )}
+
+      {/* Create/Edit Modal */}
+      <Modal
+        isOpen={isModalOpen}
+        onClose={() => setIsModalOpen(false)}
+        title={selectedQuestion ? "Edit Question" : "Add Question"}
+        size="lg"
+        footer={
+          <>
+            <Button
+              variant="ghost"
+              onClick={() => setIsModalOpen(false)}
+              disabled={isSubmitting}
+            >
+              Cancel
+            </Button>
+            <Button onClick={handleSubmit} isLoading={isSubmitting}>
+              {selectedQuestion ? "Save Changes" : "Add Question"}
+            </Button>
+          </>
+        }
+      >
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <Input
+            label="Order Number"
+            type="number"
+            min={1}
+            value={formData.question_order}
+            onChange={(e) =>
+              setFormData((prev) => ({
+                ...prev,
+                question_order: parseInt(e.target.value) || 1,
+              }))
+            }
+            required
+          />
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1.5">
+              Question Text
+            </label>
+            <textarea
+              className="w-full px-4 py-2.5 rounded-lg border border-gray-200 transition-all duration-200
+                text-gray-900 placeholder-gray-400 resize-none
+                focus:outline-none focus:ring-2 focus:ring-offset-0 focus:border-maroon-500 focus:ring-maroon-100"
+              rows={4}
+              placeholder="Enter the evaluation question..."
+              value={formData.question_text}
+              onChange={(e) =>
+                setFormData((prev) => ({
+                  ...prev,
+                  question_text: e.target.value,
+                }))
+              }
+              required
+            />
+          </div>
+          <label className="flex items-center gap-3 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={formData.is_required}
+              onChange={(e) =>
+                setFormData((prev) => ({
+                  ...prev,
+                  is_required: e.target.checked,
+                }))
+              }
+              className="w-4 h-4 text-maroon-800 border-gray-300 rounded focus:ring-maroon-500"
+            />
+            <span className="text-sm text-gray-700">
+              Required question (must be answered)
+            </span>
+          </label>
+        </form>
+      </Modal>
+
+      {/* Delete Confirmation */}
+      <ConfirmDialog
+        isOpen={isDeleteOpen}
+        onClose={() => setIsDeleteOpen(false)}
+        onConfirm={handleDelete}
+        title="Delete Question"
+        message="Are you sure you want to delete this question? This action cannot be undone."
+        confirmText="Delete"
+        confirmVariant="danger"
+        isLoading={isSubmitting}
+      />
+    </div>
+  );
+}
