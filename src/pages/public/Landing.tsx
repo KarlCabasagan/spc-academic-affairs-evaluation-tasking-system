@@ -9,6 +9,7 @@ export default function Landing() {
   const [areas, setAreas] = useState<Area[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [isImageLoaded, setIsImageLoaded] = useState(false);
 
   useEffect(() => {
     fetchAreas();
@@ -70,9 +71,18 @@ export default function Landing() {
     <div className="animate-fade-in">
       {/* Hero Section */}
       <section className="relative overflow-hidden text-white py-16 sm:py-24">
+        {/* Preload Image */}
+        <img
+          src={heroImage}
+          className="hidden"
+          onLoad={() => setIsImageLoaded(true)}
+          alt=""
+        />
         {/* Background Image */}
         <div
-          className="absolute inset-0 bg-cover bg-position-[50%_20%]"
+          className={`absolute inset-0 bg-cover bg-position-[50%_20%] transition-opacity duration-1000 ${
+            isImageLoaded ? "opacity-100" : "opacity-0"
+          }`}
           style={{ backgroundImage: `url(${heroImage})` }}
         />
         {/* Gradient Overlay */}

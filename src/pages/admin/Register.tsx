@@ -237,7 +237,7 @@ export default function Register() {
         <div className="text-center mt-6">
           <a
             href="/"
-            className="text-sm text-maroon-200 hover:text-white transition-colors"
+            className="text-sm text-maroon-200! hover:text-white! transition-colors"
           >
             ← Back to Evaluation Portal
           </a>
