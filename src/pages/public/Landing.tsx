@@ -80,7 +80,7 @@ export default function Landing() {
         />
         {/* Background Image */}
         <div
-          className={`absolute inset-0 bg-cover bg-position-[50%_20%] transition-opacity duration-1000 ${
+          className={`absolute inset-0 bg-cover bg-position-[50%_60%] transition-opacity duration-1000 ${
             isImageLoaded ? "opacity-100" : "opacity-0"
           }`}
           style={{ backgroundImage: `url(${heroImage})` }}
