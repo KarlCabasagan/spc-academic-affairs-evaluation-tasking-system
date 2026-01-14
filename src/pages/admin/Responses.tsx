@@ -19,6 +19,11 @@ interface SessionWithCollege {
   completed_at: string | null;
   is_complete: boolean;
   colleges: { name: string } | null;
+  responses: Array<{
+    questions: {
+      areas: { name: string; area_number: number } | null;
+    } | null;
+  }>;
 }
 
 interface ResponseDetail {
@@ -74,7 +79,12 @@ export default function Responses() {
         .select(
           `
           *,
-          colleges (name)
+          colleges (name),
+          responses (
+            questions (
+              areas (name, area_number)
+            )
+          )
         `
         )
         .eq("is_complete", true)
@@ -272,6 +282,25 @@ export default function Responses() {
                     <span>•</span>
                     <span>{formatDate(session.completed_at)}</span>
                   </div>
+                  {session.responses && session.responses.length > 0 && (
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {[
+                        ...new Set(
+                          session.responses
+                            .map((r) => r.questions?.areas)
+                            .filter(Boolean)
+                            .map((a) => `Area ${a?.area_number}`)
+                        ),
+                      ].map((areaLabel) => (
+                        <span
+                          key={areaLabel}
+                          className="px-2 py-0.5 my-0.5 bg-maroon-50 text-maroon-700 text-xs rounded"
+                        >
+                          {areaLabel}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
               <Button

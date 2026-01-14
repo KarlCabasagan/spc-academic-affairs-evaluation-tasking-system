@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { supabase } from "../../lib/supabase";
 import type { College, ComplianceStatus } from "../../lib/types";
 import * as XLSX from "xlsx";
@@ -368,26 +368,17 @@ export default function Reports() {
                 <tr>
                   <th className="px-4 py-2 text-left text-xs text-gray-400 sticky left-0 bg-gray-50 z-10"></th>
                   {colleges.map((college) => (
-                    <>
-                      <th
-                        key={`${college.id}-c`}
-                        className="px-2 py-2 text-center text-xs text-green-600 font-medium border-l border-gray-200"
-                      >
+                    <Fragment key={`header-${college.id}`}>
+                      <th className="px-2 py-2 text-center text-xs text-green-600 font-medium border-l border-gray-200">
                         ✓
                       </th>
-                      <th
-                        key={`${college.id}-nc`}
-                        className="px-2 py-2 text-center text-xs text-red-600 font-medium"
-                      >
+                      <th className="px-2 py-2 text-center text-xs text-red-600 font-medium">
                         ✗
                       </th>
-                      <th
-                        key={`${college.id}-na`}
-                        className="px-2 py-2 text-center text-xs text-gray-400 font-medium"
-                      >
+                      <th className="px-2 py-2 text-center text-xs text-gray-400 font-medium">
                         N/A
                       </th>
-                    </>
+                    </Fragment>
                   ))}
                 </tr>
               </thead>
@@ -410,26 +401,17 @@ export default function Reports() {
                         not_applicable: 0,
                       };
                       return (
-                        <>
-                          <td
-                            key={`${college.id}-c`}
-                            className="px-2 py-3 text-center text-sm text-green-600 border-l border-gray-100"
-                          >
+                        <Fragment key={`data-${college.id}`}>
+                          <td className="px-2 py-3 text-center text-sm text-green-600 border-l border-gray-100">
                             {data.complied}
                           </td>
-                          <td
-                            key={`${college.id}-nc`}
-                            className="px-2 py-3 text-center text-sm text-red-600"
-                          >
+                          <td className="px-2 py-3 text-center text-sm text-red-600">
                             {data.not_complied}
                           </td>
-                          <td
-                            key={`${college.id}-na`}
-                            className="px-2 py-3 text-center text-sm text-gray-400"
-                          >
+                          <td className="px-2 py-3 text-center text-sm text-gray-400">
                             {data.not_applicable}
                           </td>
-                        </>
+                        </Fragment>
                       );
                     })}
                   </tr>
