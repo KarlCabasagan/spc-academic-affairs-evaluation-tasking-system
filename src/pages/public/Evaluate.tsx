@@ -7,10 +7,12 @@ import type {
   Question,
   ComplianceStatus,
   ResponseFormData,
+  College,
 } from "../../lib/types";
 import {
   Button,
   Card,
+  Input,
   Loading,
   Textarea,
   showToast,
@@ -33,11 +35,32 @@ export default function Evaluate() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Guest identification
+  const [colleges, setColleges] = useState<College[]>([]);
+  const [guestName, setGuestName] = useState("");
+  const [collegeId, setCollegeId] = useState("");
+
   useEffect(() => {
     if (areaId) {
       fetchAreaAndQuestions();
+      fetchColleges();
     }
   }, [areaId]);
+
+  const fetchColleges = async () => {
+    try {
+      const { data, error } = await supabase
+        .from("colleges")
+        .select("*")
+        .eq("is_active", true)
+        .order("name", { ascending: true });
+
+      if (error) throw error;
+      setColleges(data || []);
+    } catch (err) {
+      console.error("Error fetching colleges:", err);
+    }
+  };
 
   const fetchAreaAndQuestions = async () => {
     try {
@@ -119,6 +142,16 @@ export default function Evaluate() {
   };
 
   const handleSubmit = async () => {
+    // Validate guest info
+    if (!guestName.trim()) {
+      showToast("Please enter your full name", "error");
+      return;
+    }
+    if (!collegeId) {
+      showToast("Please select your college", "error");
+      return;
+    }
+
     const requiredUnanswered = getRequiredUnanswered();
     if (requiredUnanswered.length > 0) {
       showToast(
@@ -130,11 +163,15 @@ export default function Evaluate() {
 
     setIsSubmitting(true);
     try {
-      // Create session
+      // Create session with guest info
       const sessionToken = uuidv4();
       const { data: sessionData, error: sessionError } = await supabase
         .from("evaluation_sessions")
-        .insert({ session_token: sessionToken })
+        .insert({
+          session_token: sessionToken,
+          guest_name: guestName.trim(),
+          college_id: collegeId,
+        })
         .select()
         .single();
 
@@ -277,8 +314,64 @@ export default function Evaluate() {
         </div>
       </div>
 
+      {/* Guest Information */}
+      <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 pt-8">
+        <Card className="mb-6">
+          <div className="flex items-start gap-3 mb-4">
+            <div className="w-8 h-8 bg-maroon-100 text-maroon-800 rounded-lg flex items-center justify-center shrink-0">
+              <svg
+                className="w-4 h-4"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"
+                />
+              </svg>
+            </div>
+            <div>
+              <h2 className="font-semibold text-gray-900">Your Information</h2>
+              <p className="text-sm text-gray-500">
+                Please provide your details before answering the evaluation
+              </p>
+            </div>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Input
+              label="Full Name"
+              placeholder="Enter your full name"
+              value={guestName}
+              onChange={(e) => setGuestName(e.target.value)}
+              required
+            />
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                College <span className="text-red-500">*</span>
+              </label>
+              <select
+                className="w-full px-4 py-2.5 bg-white border border-gray-300 rounded-lg text-gray-900 focus:outline-none focus:ring-2 focus:ring-maroon-500 focus:border-transparent transition-colors"
+                value={collegeId}
+                onChange={(e) => setCollegeId(e.target.value)}
+                required
+              >
+                <option value="">Select your college</option>
+                {colleges.map((college) => (
+                  <option key={college.id} value={college.id}>
+                    {college.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+        </Card>
+      </div>
+
       {/* Questions */}
-      <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 pb-8">
         {questions.length === 0 ? (
           <Card className="text-center py-12">
             <svg

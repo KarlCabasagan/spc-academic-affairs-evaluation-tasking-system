@@ -69,6 +69,20 @@ CREATE TABLE responses (
     UNIQUE(session_id, question_id)
 );
 
+-- Colleges Table: Organizational units for guest identification
+CREATE TABLE colleges (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name VARCHAR(255) NOT NULL UNIQUE,
+    parent_id UUID REFERENCES colleges(id) ON DELETE SET NULL,  -- For future department support
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Add guest identification columns to evaluation_sessions
+ALTER TABLE evaluation_sessions ADD COLUMN guest_name VARCHAR(255);
+ALTER TABLE evaluation_sessions ADD COLUMN college_id UUID REFERENCES colleges(id);
+
 -- ============================================
 -- Indexes for Performance
 -- ============================================
@@ -95,6 +109,13 @@ CREATE TRIGGER update_questions_updated_at
     BEFORE UPDATE ON questions
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
+CREATE TRIGGER update_colleges_updated_at
+    BEFORE UPDATE ON colleges
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- Index for session lookups by college
+CREATE INDEX idx_sessions_college_id ON evaluation_sessions(college_id);
+
 -- ============================================
 -- Row Level Security Policies
 -- ============================================
@@ -104,6 +125,7 @@ ALTER TABLE areas ENABLE ROW LEVEL SECURITY;
 ALTER TABLE questions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE evaluation_sessions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE responses ENABLE ROW LEVEL SECURITY;
+ALTER TABLE colleges ENABLE ROW LEVEL SECURITY;
 
 -- Areas: Admin can do everything, anonymous can only read active areas
 CREATE POLICY "Admin full access to areas"
@@ -163,6 +185,18 @@ CREATE POLICY "Anonymous can insert responses"
 ON responses FOR INSERT
 TO anon
 WITH CHECK (true);
+
+-- Colleges: Admin can do everything, anonymous can only read active colleges
+CREATE POLICY "Admin full access to colleges"
+ON colleges FOR ALL
+TO authenticated
+USING (true)
+WITH CHECK (true);
+
+CREATE POLICY "Anonymous can read active colleges"
+ON colleges FOR SELECT
+TO anon
+USING (is_active = true);
 
 -- ============================================
 -- Seed Default PACUCOA Areas

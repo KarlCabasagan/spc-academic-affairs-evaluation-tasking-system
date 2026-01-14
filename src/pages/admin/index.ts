@@ -3,3 +3,6 @@ export { default as Register } from "./Register";
 export { default as Dashboard } from "./Dashboard";
 export { default as Areas } from "./Areas";
 export { default as Questions } from "./Questions";
+export { default as Colleges } from "./Colleges";
+export { default as Responses } from "./Responses";
+export { default as Reports } from "./Reports";

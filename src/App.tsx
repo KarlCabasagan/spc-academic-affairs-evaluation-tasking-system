@@ -3,7 +3,16 @@ import { AuthProvider } from "./context/AuthContext";
 import { PublicLayout, AdminLayout } from "./components/layout";
 import { ToastContainer } from "./components/ui";
 import { Landing, Evaluate, Complete } from "./pages/public";
-import { Login, Register, Dashboard, Areas, Questions } from "./pages/admin";
+import {
+  Login,
+  Register,
+  Dashboard,
+  Areas,
+  Questions,
+  Colleges,
+  Responses,
+  Reports,
+} from "./pages/admin";
 
 function App() {
   return (
@@ -25,6 +34,9 @@ function App() {
             <Route path="dashboard" element={<Dashboard />} />
             <Route path="areas" element={<Areas />} />
             <Route path="areas/:areaId" element={<Questions />} />
+            <Route path="colleges" element={<Colleges />} />
+            <Route path="responses" element={<Responses />} />
+            <Route path="reports" element={<Reports />} />
           </Route>
 
           {/* 404 - Redirect to home */}

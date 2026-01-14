@@ -23,9 +23,20 @@ export interface Question {
   updated_at: string;
 }
 
+export interface College {
+  id: string;
+  name: string;
+  parent_id: string | null;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface EvaluationSession {
   id: string;
   session_token: string;
+  guest_name: string | null;
+  college_id: string | null;
   started_at: string;
   completed_at: string | null;
   is_complete: boolean;
