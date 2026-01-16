@@ -408,13 +408,35 @@ export default function Responses() {
   return (
     <div className="animate-fade-in">
       {/* Header */}
-      <div className="mb-8">
-        <h1 className="text-2xl sm:text-3xl font-bold text-gray-900">
-          Compliance Analytics
-        </h1>
-        <p className="text-gray-600 mt-1">
-          View evaluation compliance by college, area, and question
-        </p>
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-8">
+        <div>
+          <h1 className="text-2xl sm:text-3xl font-bold text-gray-900">
+            Compliance Analytics
+          </h1>
+          <p className="text-gray-600 mt-1">
+            View evaluation compliance by college, area, and question
+          </p>
+        </div>
+        <Button
+          variant="danger"
+          onClick={() => setShowResetModal(true)}
+          className="shrink-0 self-start sm:self-auto"
+        >
+          <svg
+            className="w-4 h-4 mr-2"
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={2}
+              d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+            />
+          </svg>
+          Reset All Data
+        </Button>
       </div>
 
       {/* Search & Actions */}
@@ -428,13 +450,6 @@ export default function Responses() {
               onChange={(e) => setSearchTerm(e.target.value)}
             />
           </div>
-          <Button
-            variant="danger"
-            onClick={() => setShowResetModal(true)}
-            className="shrink-0"
-          >
-            Reset All Data
-          </Button>
           <div className="text-sm text-gray-500">
             Showing {filteredColleges.length} of {collegesData.length} colleges
           </div>
@@ -589,6 +604,35 @@ export default function Responses() {
                 </ul>
                 <p className="text-sm text-red-700 mt-2 font-medium">
                   This action CANNOT be undone.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Export Reminder */}
+          <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+            <div className="flex items-start gap-3">
+              <svg
+                className="w-5 h-5 text-amber-600 shrink-0 mt-0.5"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                />
+              </svg>
+              <div>
+                <h4 className="font-semibold text-amber-800">
+                  Before You Continue
+                </h4>
+                <p className="text-sm text-amber-700 mt-1">
+                  Make sure to <strong>export the compliance reports</strong>{" "}
+                  from the <span className="underline">Reports page</span>{" "}
+                  before resetting all data.
                 </p>
               </div>
             </div>
