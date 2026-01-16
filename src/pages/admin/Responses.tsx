@@ -60,6 +60,34 @@ export default function Responses() {
 
   useEffect(() => {
     fetchComplianceData();
+
+    // Set up real-time subscriptions
+    const sessionsChannel = supabase
+      .channel("responses-sessions")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "evaluation_sessions" },
+        () => {
+          fetchComplianceData();
+        }
+      )
+      .subscribe();
+
+    const responsesChannel = supabase
+      .channel("responses-responses")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "responses" },
+        () => {
+          fetchComplianceData();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(sessionsChannel);
+      supabase.removeChannel(responsesChannel);
+    };
   }, []);
 
   // Handle data reset with password verification

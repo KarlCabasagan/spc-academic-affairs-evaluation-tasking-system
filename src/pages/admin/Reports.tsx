@@ -33,6 +33,34 @@ export default function Reports() {
 
   useEffect(() => {
     fetchData();
+
+    // Set up real-time subscriptions
+    const sessionsChannel = supabase
+      .channel("reports-sessions")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "evaluation_sessions" },
+        () => {
+          fetchData();
+        }
+      )
+      .subscribe();
+
+    const responsesChannel = supabase
+      .channel("reports-responses")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "responses" },
+        () => {
+          fetchData();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(sessionsChannel);
+      supabase.removeChannel(responsesChannel);
+    };
   }, []);
 
   const fetchData = async () => {

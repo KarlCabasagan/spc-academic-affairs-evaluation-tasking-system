@@ -12,7 +12,7 @@ interface Stats {
   totalEvaluations: number;
   completedEvaluations: number;
   averageCompliance: number | null;
-  completionRate: number;
+  totalResponses: number;
 }
 
 interface RecentActivity {
@@ -29,6 +29,34 @@ export default function Dashboard() {
 
   useEffect(() => {
     fetchDashboardData();
+
+    // Set up real-time subscriptions
+    const sessionsChannel = supabase
+      .channel("dashboard-sessions")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "evaluation_sessions" },
+        () => {
+          fetchDashboardData();
+        }
+      )
+      .subscribe();
+
+    const responsesChannel = supabase
+      .channel("dashboard-responses")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "responses" },
+        () => {
+          fetchDashboardData();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(sessionsChannel);
+      supabase.removeChannel(responsesChannel);
+    };
   }, []);
 
   const fetchDashboardData = async () => {
@@ -77,16 +105,10 @@ export default function Dashboard() {
         .select("*", { count: "exact", head: true })
         .eq("is_complete", true);
 
-      // Calculate completion rate
-      const completionRate =
-        totalEvaluations && totalEvaluations > 0
-          ? ((completedEvaluations || 0) / totalEvaluations) * 100
-          : 0;
-
-      // Fetch responses for average compliance
-      const { data: responses } = await supabase
+      // Fetch responses for average compliance and total count
+      const { data: responses, count: totalResponses } = await supabase
         .from("responses")
-        .select("status");
+        .select("status", { count: "exact" });
 
       let averageCompliance: number | null = null;
       if (responses && responses.length > 0) {
@@ -117,14 +139,18 @@ export default function Dashboard() {
 
       const recent: RecentActivity[] = (recentSessions || [])
         .filter((s) => s.colleges && s.completed_at)
-        .map((s) => ({
-          id: s.id,
-          collegeName: (s.colleges as { name: string; code: string | null })
-            .name,
-          collegeCode: (s.colleges as { name: string; code: string | null })
-            .code,
-          completedAt: s.completed_at!,
-        }));
+        .map((s) => {
+          const college = s.colleges as unknown as {
+            name: string;
+            code: string | null;
+          };
+          return {
+            id: s.id,
+            collegeName: college.name,
+            collegeCode: college.code,
+            completedAt: s.completed_at!,
+          };
+        });
 
       setStats({
         totalAreas: totalAreas || 0,
@@ -135,7 +161,7 @@ export default function Dashboard() {
         totalEvaluations: totalEvaluations || 0,
         completedEvaluations: completedEvaluations || 0,
         averageCompliance,
-        completionRate,
+        totalResponses: totalResponses || 0,
       });
 
       setRecentActivity(recent);
@@ -221,7 +247,7 @@ export default function Dashboard() {
               </p>
               <p
                 className={`text-3xl font-bold mt-1 ${
-                  stats?.averageCompliance !== null
+                  stats && stats.averageCompliance !== null
                     ? stats.averageCompliance >= 80
                       ? "text-emerald-600"
                       : stats.averageCompliance >= 50
@@ -230,7 +256,7 @@ export default function Dashboard() {
                     : "text-gray-400"
                 }`}
               >
-                {stats?.averageCompliance !== null
+                {stats && stats.averageCompliance !== null
                   ? `${stats.averageCompliance.toFixed(1)}%`
                   : "—"}
               </p>
@@ -286,19 +312,18 @@ export default function Dashboard() {
           </div>
         </Card>
 
-        {/* Completion Rate */}
+        {/* Total Responses */}
         <Card>
           <div className="flex items-start justify-between">
             <div>
               <p className="text-sm font-medium text-gray-600">
-                Completion Rate
+                Total Responses
               </p>
               <p className="text-3xl font-bold text-gray-900 mt-1">
-                {stats?.completionRate.toFixed(0) || 0}%
+                {stats?.totalResponses.toLocaleString() || 0}
               </p>
               <p className="text-sm text-gray-500 mt-1">
-                {stats?.completedEvaluations || 0} of{" "}
-                {stats?.totalEvaluations || 0}
+                from {stats?.completedEvaluations || 0} submissions
               </p>
             </div>
             <div className="w-12 h-12 bg-purple-100 rounded-xl flex items-center justify-center">
@@ -312,7 +337,7 @@ export default function Dashboard() {
                   strokeLinecap="round"
                   strokeLinejoin="round"
                   strokeWidth={2}
-                  d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"
+                  d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
                 />
               </svg>
             </div>
