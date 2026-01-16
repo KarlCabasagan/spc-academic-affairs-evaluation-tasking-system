@@ -61,14 +61,32 @@ export default function Reports() {
           id,
           question_text,
           question_order,
+          parent_id,
           areas (name, area_number)
         `
         )
-        .eq("is_active", true)
         .order("question_order", { ascending: true });
 
       if (questionsError) throw questionsError;
-      setQuestions((questionsData as unknown as QuestionWithArea[]) || []);
+
+      // Filter for leaf nodes (questions that are NOT parents)
+      // 1. Get all parent IDs
+      const allQuestions =
+        (questionsData as unknown as (QuestionWithArea & {
+          parent_id: string | null;
+        })[]) || [];
+
+      // 2. Also check which questions are referred to as parents by others
+      const actualParentIds = new Set(
+        allQuestions.map((q) => q.parent_id).filter((id) => id !== null)
+      );
+
+      // 3. Filter: Keep if ID is NOT in actualParentIds
+      const leafQuestions = allQuestions.filter(
+        (q) => !actualParentIds.has(q.id)
+      );
+
+      setQuestions(leafQuestions);
 
       // Fetch all responses with session info
       const { data: responsesData, error: responsesError } =

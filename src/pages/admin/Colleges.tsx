@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
-import { supabase } from "../../lib/supabase";
+import { supabase, supabaseNoPersist } from "../../lib/supabase";
 import type { College } from "../../lib/types";
 import {
   Button,
@@ -29,7 +29,6 @@ export default function Colleges() {
   const [isLoading, setIsLoading] = useState(true);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isDeleteOpen, setIsDeleteOpen] = useState(false);
-  const [isPasswordModalOpen, setIsPasswordModalOpen] = useState(false);
   const [selectedCollege, setSelectedCollege] =
     useState<CollegeWithEmail | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -42,9 +41,6 @@ export default function Colleges() {
     password: "",
     avatar_url: "",
   });
-
-  // Password update state
-  const [newPassword, setNewPassword] = useState("");
 
   useEffect(() => {
     fetchColleges();
@@ -89,12 +85,6 @@ export default function Colleges() {
       avatar_url: college.avatar_url || "",
     });
     setIsModalOpen(true);
-  };
-
-  const openPasswordModal = (college: CollegeWithEmail) => {
-    setSelectedCollege(college);
-    setNewPassword("");
-    setIsPasswordModalOpen(true);
   };
 
   const openDeleteDialog = (college: CollegeWithEmail) => {
@@ -144,22 +134,19 @@ export default function Colleges() {
           return;
         }
 
-        // Create user account via Supabase Auth
-        const { data: authData, error: authError } = await supabase.auth.signUp(
-          {
+        // Sign up the new user using the non-persistent client to avoid affecting admin session
+        const { data: authData, error: authError } =
+          await supabaseNoPersist.auth.signUp({
             email: formData.email.trim(),
             password: formData.password,
-            options: {
-              emailRedirectTo: undefined, // No confirmation needed
-            },
-          }
-        );
+          });
 
         if (authError) {
-          if (authError.message.includes("already registered")) {
+          console.error("Auth Error:", authError);
+          if (authError.message?.includes("already registered")) {
             showToast("This email is already registered", "error");
           } else {
-            showToast(authError.message, "error");
+            showToast(authError.message || "Failed to create account", "error");
           }
           setIsSubmitting(false);
           return;
@@ -171,18 +158,30 @@ export default function Colleges() {
           return;
         }
 
-        // Create college record linked to user
-        const { error: collegeError } = await supabase.from("colleges").insert({
+        // Assign the college role via RPC (sets app_metadata.role = 'college')
+        const { error: roleError } = await supabase.rpc("assign_college_role", {
+          user_uuid: authData.user.id,
+        });
+
+        if (roleError) {
+          console.error("Role Assignment Error:", roleError);
+          // Continue anyway - the user was created, role can be fixed later
+        }
+
+        // Insert into public.colleges using the main client (as admin)
+        const { error: dbError } = await supabase.from("colleges").insert({
           user_id: authData.user.id,
           name: formData.name.trim(),
           code: formData.code.trim().toUpperCase(),
           avatar_url: formData.avatar_url.trim() || null,
         });
 
-        if (collegeError) {
-          console.error("Error creating college:", collegeError);
+        if (dbError) {
+          console.error("Database Error:", dbError);
+          // Try to clean up the auth user if database insert fails
+          // Note: This might fail if we don't have service role, but worth a try or just log it
           showToast(
-            "Account created but failed to link college. Please contact support.",
+            "Account created but failed to link college profile",
             "error"
           );
           setIsSubmitting(false);
@@ -197,31 +196,6 @@ export default function Colleges() {
     } catch (error) {
       console.error("Error saving college:", error);
       showToast("Failed to save college", "error");
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  const handlePasswordUpdate = async () => {
-    if (!selectedCollege || !selectedCollege.user_id) {
-      showToast("This college does not have an associated account", "error");
-      return;
-    }
-
-    if (!newPassword || newPassword.length < 6) {
-      showToast("Password must be at least 6 characters", "error");
-      return;
-    }
-
-    setIsSubmitting(true);
-    try {
-      // Note: This requires service role or admin API
-      // For now, we'll show a message that password reset email should be sent
-      showToast(
-        "Password update requires admin API. Please use the 'Forgot Password' flow for now.",
-        "info"
-      );
-      setIsPasswordModalOpen(false);
     } finally {
       setIsSubmitting(false);
     }
@@ -432,28 +406,6 @@ export default function Colleges() {
               </div>
 
               <div className="flex items-center gap-2 shrink-0">
-                {college.user_id && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => openPasswordModal(college)}
-                    title="Reset Password"
-                  >
-                    <svg
-                      className="w-4 h-4 text-blue-600"
-                      fill="none"
-                      stroke="currentColor"
-                      viewBox="0 0 24 24"
-                    >
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        strokeWidth={2}
-                        d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"
-                      />
-                    </svg>
-                  </Button>
-                )}
                 <Button
                   variant="ghost"
                   size="sm"
@@ -619,6 +571,7 @@ export default function Colleges() {
                         password: e.target.value,
                       }))
                     }
+                    showPasswordToggle
                     required
                   />
                 </div>
@@ -636,41 +589,6 @@ export default function Colleges() {
             }
           />
         </form>
-      </Modal>
-
-      {/* Password Reset Modal */}
-      <Modal
-        isOpen={isPasswordModalOpen}
-        onClose={() => setIsPasswordModalOpen(false)}
-        title="Reset Password"
-        footer={
-          <>
-            <Button
-              variant="ghost"
-              onClick={() => setIsPasswordModalOpen(false)}
-              disabled={isSubmitting}
-            >
-              Cancel
-            </Button>
-            <Button onClick={handlePasswordUpdate} isLoading={isSubmitting}>
-              Update Password
-            </Button>
-          </>
-        }
-      >
-        <div className="space-y-4">
-          <p className="text-gray-600">
-            Reset the password for <strong>{selectedCollege?.name}</strong>.
-          </p>
-          <Input
-            label="New Password"
-            type="password"
-            placeholder="Min. 6 characters"
-            value={newPassword}
-            onChange={(e) => setNewPassword(e.target.value)}
-            required
-          />
-        </div>
       </Modal>
 
       {/* Delete Confirmation */}

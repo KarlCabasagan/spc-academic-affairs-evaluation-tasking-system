@@ -555,10 +555,16 @@ export default function Questions() {
     }
   };
 
-  // Get total count including nested
-  const getTotalCount = (items: Question[]): number => {
+  // Count only leaf questions (terminal nodes without children - these are answerable)
+  const getLeafCount = (items: Question[]): number => {
     return items.reduce((count, item) => {
-      return count + 1 + (item.children ? getTotalCount(item.children) : 0);
+      if (item.children && item.children.length > 0) {
+        // This is a parent node - don't count it, but count its children
+        return count + getLeafCount(item.children);
+      } else {
+        // This is a leaf node - count it
+        return count + 1;
+      }
     }, 0);
   };
 
@@ -626,8 +632,8 @@ export default function Questions() {
                 {area.name}
               </h1>
               <p className="text-gray-600">
-                {getTotalCount(questionTree)} question
-                {getTotalCount(questionTree) !== 1 ? "s" : ""}
+                {getLeafCount(questionTree)} answerable question
+                {getLeafCount(questionTree) !== 1 ? "s" : ""}
               </p>
             </div>
           </div>

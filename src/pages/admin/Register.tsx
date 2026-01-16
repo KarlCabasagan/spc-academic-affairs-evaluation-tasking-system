@@ -73,12 +73,15 @@ export default function Register() {
 
     setIsSubmitting(true);
     try {
-      // Sign up the user with email confirmation
+      // Sign up the first admin with role in metadata
       const { error: signUpError } = await supabase.auth.signUp({
         email,
         password,
         options: {
           emailRedirectTo: `${window.location.origin}/admin/dashboard`,
+          data: {
+            role: "admin",
+          },
         },
       });
 
@@ -209,6 +212,7 @@ export default function Register() {
               onChange={(e) => setPassword(e.target.value)}
               autoComplete="new-password"
               helperText="At least 6 characters"
+              showPasswordToggle
               required
             />
 
@@ -219,6 +223,7 @@ export default function Register() {
               value={confirmPassword}
               onChange={(e) => setConfirmPassword(e.target.value)}
               autoComplete="new-password"
+              showPasswordToggle
               required
             />
 

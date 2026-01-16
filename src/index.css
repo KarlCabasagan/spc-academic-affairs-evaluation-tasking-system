@@ -1,3 +1,6 @@
+/* Import Google Font - must come first */
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap");
+
 @import "tailwindcss";
 
 @theme {
@@ -13,7 +16,7 @@
   --color-maroon-800: #800020;
   --color-maroon-900: #6b1a35;
   --color-maroon-950: #3d0a1b;
-  
+
   /* Status Colors */
   --color-complied: #16a34a;
   --color-complied-light: #dcfce7;
@@ -21,13 +24,11 @@
   --color-not-complied-light: #fee2e2;
   --color-not-applicable: #6b7280;
   --color-not-applicable-light: #f3f4f6;
-  
-  /* Typography */
-  --font-sans: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-}
 
-/* Import Google Font */
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+  /* Typography */
+  --font-sans: "Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    Roboto, sans-serif;
+}
 
 /* Base Styles */
 * {
@@ -85,31 +86,42 @@ a {
 }
 
 /* Input Reset */
-input, textarea, select {
+input,
+textarea,
+select {
   font-family: inherit;
   font-size: inherit;
 }
 
 /* Animation Utilities */
 @keyframes fadeIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
 @keyframes slideUp {
-  from { 
+  from {
     opacity: 0;
     transform: translateY(10px);
   }
-  to { 
+  to {
     opacity: 1;
     transform: translateY(0);
   }
 }
 
 @keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
 }
 
 .animate-fade-in {

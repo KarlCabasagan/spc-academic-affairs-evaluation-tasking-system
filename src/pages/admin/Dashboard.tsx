@@ -31,10 +31,20 @@ export default function Dashboard() {
         .select("*", { count: "exact", head: true })
         .eq("is_active", true);
 
-      // Fetch questions count
-      const { count: totalQuestions } = await supabase
+      // Fetch leaf questions count (questions that are not parents of other questions)
+      const { data: allQuestions } = await supabase
         .from("questions")
-        .select("*", { count: "exact", head: true });
+        .select("id, parent_id")
+        .eq("is_active", true);
+
+      // Count questions that don't have any children (leaf nodes)
+      const parentIds = new Set(
+        (allQuestions || []).filter((q) => q.parent_id).map((q) => q.parent_id)
+      );
+      const leafQuestions = (allQuestions || []).filter(
+        (q) => !parentIds.has(q.id)
+      );
+      const totalQuestions = leafQuestions.length;
 
       // Fetch evaluations count
       const { count: totalEvaluations } = await supabase

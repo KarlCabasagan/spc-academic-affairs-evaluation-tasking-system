@@ -12,10 +12,30 @@ interface AuthContextType {
   isLoading: boolean;
   signIn: (email: string, password: string) => Promise<{ error: Error | null }>;
   signOut: () => Promise<void>;
-  refreshRole: () => Promise<void>;
+  refreshCollege: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
+
+// Get role from user metadata - synchronous, no DB call needed
+function getRoleFromMetadata(user: User | null): UserRole | null {
+  if (!user) return null;
+
+  // Check app_metadata first (set by admin/service role)
+  const appRole = user.app_metadata?.role as UserRole | undefined;
+  if (appRole === "admin" || appRole === "college") {
+    return appRole;
+  }
+
+  // Check user_metadata as fallback
+  const userRole = user.user_metadata?.role as UserRole | undefined;
+  if (userRole === "admin" || userRole === "college") {
+    return userRole;
+  }
+
+  // Default to admin if no role set (for backwards compatibility)
+  return "admin";
+}
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
@@ -24,84 +44,87 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [college, setCollege] = useState<College | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
-  const fetchUserRole = async (userId: string) => {
+  // Fetch college profile for college users (background, non-blocking)
+  const fetchCollegeProfile = async (userId: string) => {
     try {
-      const { data: roleData } = await supabase.rpc("get_user_role", {
-        user_uuid: userId,
-      });
-      setUserRole(roleData as UserRole);
+      const { data } = await supabase
+        .from("colleges")
+        .select("id, name, code, avatar_url")
+        .eq("user_id", userId)
+        .eq("is_active", true)
+        .maybeSingle();
 
-      // If college user, fetch college profile
-      if (roleData === "college") {
-        const { data: collegeData } = await supabase.rpc(
-          "get_college_by_user",
-          {
-            user_uuid: userId,
-          }
-        );
-        if (collegeData && collegeData.length > 0) {
-          setCollege(collegeData[0] as College);
-        }
-      } else {
-        setCollege(null);
+      if (data) {
+        setCollege(data as College);
       }
-    } catch (error) {
-      console.error("Error fetching user role:", error);
-      setUserRole("admin"); // Default to admin if error
+    } catch {
+      // Ignore errors - college profile is optional enhancement
     }
   };
 
-  const refreshRole = async () => {
-    if (user) {
-      await fetchUserRole(user.id);
+  const refreshCollege = async () => {
+    if (user && userRole === "college") {
+      await fetchCollegeProfile(user.id);
     }
   };
 
   useEffect(() => {
-    // Get initial session
-    supabase.auth.getSession().then(async ({ data: { session } }) => {
+    // Handle session updates - role is read synchronously from metadata
+    const handleSession = (session: Session | null) => {
       setSession(session);
       setUser(session?.user ?? null);
 
-      if (session?.user) {
-        await fetchUserRole(session.user.id);
+      // Role is determined synchronously from metadata - NO DB call
+      const role = getRoleFromMetadata(session?.user ?? null);
+      setUserRole(role);
+
+      // Fetch college profile in background if role is college
+      if (session?.user && role === "college") {
+        fetchCollegeProfile(session.user.id);
+      } else {
+        setCollege(null);
       }
 
       setIsLoading(false);
+    };
+
+    // Get initial session
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      handleSession(session);
     });
 
     // Listen for auth changes
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange(async (_event, session) => {
-      setSession(session);
-      setUser(session?.user ?? null);
-
-      if (session?.user) {
-        await fetchUserRole(session.user.id);
-      } else {
-        setUserRole(null);
-        setCollege(null);
-      }
-
-      setIsLoading(false);
+    } = supabase.auth.onAuthStateChange((event, session) => {
+      // Skip INITIAL_SESSION - handled by getSession
+      if (event === "INITIAL_SESSION") return;
+      handleSession(session);
     });
 
-    return () => subscription.unsubscribe();
+    return () => {
+      subscription.unsubscribe();
+    };
   }, []);
 
   const signIn = async (email: string, password: string) => {
+    setIsLoading(true);
     const { error } = await supabase.auth.signInWithPassword({
       email,
       password,
     });
+    if (error) {
+      setIsLoading(false);
+    }
+    // Success: onAuthStateChange handles the rest
     return { error: error as Error | null };
   };
 
   const signOut = async () => {
+    setIsLoading(true);
     await supabase.auth.signOut();
-    setUserRole(null);
     setCollege(null);
+    // onAuthStateChange handles the rest
   };
 
   return (
@@ -114,7 +137,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         isLoading,
         signIn,
         signOut,
-        refreshRole,
+        refreshCollege,
       }}
     >
       {children}

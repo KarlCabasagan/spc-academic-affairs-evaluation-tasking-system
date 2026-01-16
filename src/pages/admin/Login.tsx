@@ -1,12 +1,11 @@
 import { useState, useEffect } from "react";
 import type { FormEvent } from "react";
-import { useNavigate, Navigate, Link } from "react-router-dom";
+import { Navigate, Link } from "react-router-dom";
 import { useAuth } from "../../context/AuthContext";
 import { supabase } from "../../lib/supabase";
 import { Button, Input, Card, Loading } from "../../components/ui";
 
 export default function Login() {
-  const navigate = useNavigate();
   const { user, userRole, isLoading, signIn } = useAuth();
 
   const [email, setEmail] = useState("");
@@ -147,6 +146,7 @@ export default function Login() {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               autoComplete="current-password"
+              showPasswordToggle
               required
             />
 
