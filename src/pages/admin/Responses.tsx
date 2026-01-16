@@ -1,186 +1,259 @@
 import { useEffect, useState } from "react";
 import { supabase } from "../../lib/supabase";
-import type { College, ComplianceStatus } from "../../lib/types";
-import {
-  Button,
-  Card,
-  Input,
-  Modal,
-  Loading,
-  showToast,
-} from "../../components/ui";
+import type {
+  College,
+  Area,
+  Question,
+  ComplianceStatus,
+} from "../../lib/types";
+import { Card, Input, Loading, showToast } from "../../components/ui";
+import ComplianceAccordion from "../../components/admin/ComplianceAccordion";
+import QuestionComplianceTree from "../../components/admin/QuestionComplianceTree";
+import type { QuestionComplianceNode } from "../../components/admin/QuestionComplianceTree";
 
-interface SessionWithCollege {
+interface ResponseData {
   id: string;
-  session_token: string;
-  guest_name: string | null;
-  college_id: string | null;
-  started_at: string;
-  completed_at: string | null;
-  is_complete: boolean;
-  colleges: { name: string } | null;
-  responses: Array<{
-    questions: {
-      areas: { name: string; area_number: number } | null;
-    } | null;
-  }>;
-}
-
-interface ResponseDetail {
-  id: string;
+  question_id: string;
   status: ComplianceStatus;
   comment: string | null;
-  questions: {
-    question_text: string;
-    question_order: number;
-    areas: { name: string; area_number: number } | null;
-  } | null;
+}
+
+interface SessionData {
+  id: string;
+  college_id: string;
+  responses: ResponseData[];
+}
+
+interface AreaComplianceData {
+  area: Area;
+  compliance: number | null;
+  questions: QuestionComplianceNode[];
+}
+
+interface CollegeComplianceData {
+  college: College;
+  overallCompliance: number | null;
+  areas: AreaComplianceData[];
 }
 
 export default function Responses() {
-  const [sessions, setSessions] = useState<SessionWithCollege[]>([]);
-  const [colleges, setColleges] = useState<College[]>([]);
+  const [collegesData, setCollegesData] = useState<CollegeComplianceData[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [searchName, setSearchName] = useState("");
-  const [filterCollegeId, setFilterCollegeId] = useState("");
-
-  // Detail modal
-  const [isDetailOpen, setIsDetailOpen] = useState(false);
-  const [selectedSession, setSelectedSession] =
-    useState<SessionWithCollege | null>(null);
-  const [sessionResponses, setSessionResponses] = useState<ResponseDetail[]>(
-    []
-  );
-  const [isLoadingDetails, setIsLoadingDetails] = useState(false);
+  const [searchTerm, setSearchTerm] = useState("");
 
   useEffect(() => {
-    fetchSessions();
-    fetchColleges();
+    fetchComplianceData();
   }, []);
 
-  const fetchColleges = async () => {
+  const fetchComplianceData = async () => {
     try {
-      const { data, error } = await supabase
+      // Fetch all active colleges
+      const { data: colleges, error: collegesError } = await supabase
         .from("colleges")
         .select("*")
+        .eq("is_active", true)
         .order("name", { ascending: true });
 
-      if (error) throw error;
-      setColleges(data || []);
-    } catch (err) {
-      console.error("Error fetching colleges:", err);
-    }
-  };
+      if (collegesError) throw collegesError;
 
-  const fetchSessions = async () => {
-    try {
-      const { data, error } = await supabase
+      // Fetch all active areas
+      const { data: areas, error: areasError } = await supabase
+        .from("areas")
+        .select("*")
+        .eq("is_active", true)
+        .order("area_number", { ascending: true });
+
+      if (areasError) throw areasError;
+
+      // Fetch all questions (for building hierarchy)
+      const { data: questions, error: questionsError } = await supabase
+        .from("questions")
+        .select("*")
+        .eq("is_active", true)
+        .order("question_order", { ascending: true });
+
+      if (questionsError) throw questionsError;
+
+      // Fetch all completed sessions with responses
+      const { data: sessions, error: sessionsError } = await supabase
         .from("evaluation_sessions")
         .select(
           `
-          *,
-          colleges (name),
+          id,
+          college_id,
           responses (
-            questions (
-              areas (name, area_number)
-            )
+            id,
+            question_id,
+            status,
+            comment
           )
         `
         )
-        .eq("is_complete", true)
-        .order("completed_at", { ascending: false });
+        .eq("is_complete", true);
 
-      if (error) throw error;
-      setSessions(data || []);
+      if (sessionsError) throw sessionsError;
+
+      // Process data for each college
+      const processedData: CollegeComplianceData[] = (colleges || []).map(
+        (college) => {
+          // Get all sessions for this college
+          const collegeSessions = (sessions || []).filter(
+            (s: SessionData) => s.college_id === college.id
+          );
+
+          // Aggregate all responses for this college
+          const allResponses: ResponseData[] = [];
+          collegeSessions.forEach((session: SessionData) => {
+            if (session.responses) {
+              allResponses.push(...session.responses);
+            }
+          });
+
+          // Create a map of question_id -> response (use latest if multiple)
+          const responseMap = new Map<string, ResponseData>();
+          allResponses.forEach((r) => {
+            responseMap.set(r.question_id, r);
+          });
+
+          // Process each area
+          const areasData: AreaComplianceData[] = (areas || []).map((area) => {
+            // Get questions for this area
+            const areaQuestions = (questions || []).filter(
+              (q: Question) => q.area_id === area.id
+            );
+
+            // Build hierarchical question tree with compliance
+            const questionTree = buildQuestionTree(areaQuestions, responseMap);
+
+            // Calculate area compliance
+            const areaCompliance = calculateTreeCompliance(questionTree);
+
+            return {
+              area,
+              compliance: areaCompliance,
+              questions: questionTree,
+            };
+          });
+
+          // Calculate overall college compliance (average of all areas with data)
+          const areasWithData = areasData.filter((a) => a.compliance !== null);
+          const overallCompliance =
+            areasWithData.length > 0
+              ? areasWithData.reduce((sum, a) => sum + (a.compliance || 0), 0) /
+                areasWithData.length
+              : null;
+
+          return {
+            college,
+            overallCompliance,
+            areas: areasData,
+          };
+        }
+      );
+
+      setCollegesData(processedData);
     } catch (error) {
-      console.error("Error fetching sessions:", error);
-      showToast("Failed to load responses", "error");
+      console.error("Error fetching compliance data:", error);
+      showToast("Failed to load compliance data", "error");
     } finally {
       setIsLoading(false);
     }
   };
 
-  const openDetailModal = async (session: SessionWithCollege) => {
-    setSelectedSession(session);
-    setIsDetailOpen(true);
-    setIsLoadingDetails(true);
+  // Build hierarchical question tree with compliance data
+  const buildQuestionTree = (
+    questions: Question[],
+    responseMap: Map<string, ResponseData>
+  ): QuestionComplianceNode[] => {
+    // Create map for quick lookup
+    const questionMap = new Map<string, Question>();
+    questions.forEach((q) => questionMap.set(q.id, q));
 
-    try {
-      const { data, error } = await supabase
-        .from("responses")
-        .select(
-          `
-          id,
-          status,
-          comment,
-          questions (
-            question_text,
-            question_order,
-            areas (name, area_number)
-          )
-        `
-        )
-        .eq("session_id", session.id)
-        .order("created_at", { ascending: true });
+    // Find root questions (no parent)
+    const roots = questions.filter((q) => !q.parent_id);
 
-      if (error) throw error;
-      setSessionResponses((data as unknown as ResponseDetail[]) || []);
-    } catch (err) {
-      console.error("Error fetching responses:", err);
-      showToast("Failed to load response details", "error");
-    } finally {
-      setIsLoadingDetails(false);
-    }
+    // Recursive function to build tree
+    const buildNode = (
+      question: Question,
+      prefix: string,
+      index: number
+    ): QuestionComplianceNode => {
+      const hierarchicalNumber = prefix
+        ? `${prefix}.${index + 1}`
+        : `${index + 1}`;
+      const children = questions
+        .filter((q) => q.parent_id === question.id)
+        .sort((a, b) => a.question_order - b.question_order)
+        .map((child, childIndex) =>
+          buildNode(child, hierarchicalNumber, childIndex)
+        );
+
+      const response = responseMap.get(question.id);
+      const isLeaf = children.length === 0;
+
+      // Calculate compliance
+      let compliance: number | null = null;
+      if (isLeaf) {
+        // Leaf node: use direct response
+        if (response) {
+          if (response.status === "not_applicable") {
+            compliance = null; // Exclude N/A from calculations
+          } else {
+            compliance = response.status === "complied" ? 100 : 0;
+          }
+        }
+      } else {
+        // Parent node: average of children (excluding nulls)
+        const childCompliances = children
+          .map((c) => c.compliance)
+          .filter((c): c is number => c !== null);
+        if (childCompliances.length > 0) {
+          compliance =
+            childCompliances.reduce((sum, c) => sum + c, 0) /
+            childCompliances.length;
+        }
+      }
+
+      return {
+        id: question.id,
+        questionText: question.question_text,
+        hierarchicalNumber,
+        response: response
+          ? { status: response.status, comment: response.comment }
+          : null,
+        compliance,
+        children,
+      };
+    };
+
+    // Sort roots and build tree
+    return roots
+      .sort((a, b) => a.question_order - b.question_order)
+      .map((root, index) => buildNode(root, "", index));
   };
 
-  // Filter sessions based on search and filter
-  const filteredSessions = sessions.filter((session) => {
-    const matchesName =
-      !searchName ||
-      session.guest_name?.toLowerCase().includes(searchName.toLowerCase());
-    const matchesCollege =
-      !filterCollegeId || session.college_id === filterCollegeId;
-    return matchesName && matchesCollege;
-  });
-
-  const formatDate = (dateStr: string | null) => {
-    if (!dateStr) return "N/A";
-    return new Date(dateStr).toLocaleString("en-US", {
-      month: "short",
-      day: "numeric",
-      year: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-    });
+  // Calculate overall compliance for a question tree
+  const calculateTreeCompliance = (
+    nodes: QuestionComplianceNode[]
+  ): number | null => {
+    const compliances = nodes
+      .map((n) => n.compliance)
+      .filter((c): c is number => c !== null);
+    if (compliances.length === 0) return null;
+    return compliances.reduce((sum, c) => sum + c, 0) / compliances.length;
   };
 
-  const getStatusBadge = (status: ComplianceStatus) => {
-    switch (status) {
-      case "complied":
-        return (
-          <span className="px-2 py-1 bg-green-100 text-green-700 text-xs font-medium rounded-full">
-            Complied
-          </span>
-        );
-      case "not_complied":
-        return (
-          <span className="px-2 py-1 bg-red-100 text-red-700 text-xs font-medium rounded-full">
-            Not Complied
-          </span>
-        );
-      case "not_applicable":
-        return (
-          <span className="px-2 py-1 bg-gray-100 text-gray-700 text-xs font-medium rounded-full">
-            N/A
-          </span>
-        );
-    }
-  };
+  // Filter colleges by search term
+  const filteredColleges = collegesData.filter(
+    (cd) =>
+      cd.college.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      cd.college.code?.toLowerCase().includes(searchTerm.toLowerCase())
+  );
 
   if (isLoading) {
     return (
       <div className="flex items-center justify-center py-16">
-        <Loading size="lg" text="Loading responses..." />
+        <Loading size="lg" text="Loading compliance data..." />
       </div>
     );
   }
@@ -190,55 +263,52 @@ export default function Responses() {
       {/* Header */}
       <div className="mb-8">
         <h1 className="text-2xl sm:text-3xl font-bold text-gray-900">
-          Response Registry
+          Compliance Analytics
         </h1>
         <p className="text-gray-600 mt-1">
-          View and search all evaluation submissions
+          View evaluation compliance by college, area, and question
         </p>
       </div>
 
-      {/* Filters */}
+      {/* Search */}
       <Card className="mb-6">
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          <Input
-            label="Search by Name"
-            placeholder="Enter name..."
-            value={searchName}
-            onChange={(e) => setSearchName(e.target.value)}
-          />
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1.5">
-              Filter by College
-            </label>
-            <select
-              className="w-full px-4 py-2.5 bg-white border border-gray-300 rounded-lg text-gray-900 focus:outline-none focus:ring-2 focus:ring-maroon-500 focus:border-transparent transition-colors"
-              value={filterCollegeId}
-              onChange={(e) => setFilterCollegeId(e.target.value)}
-            >
-              <option value="">All Colleges</option>
-              {colleges.map((college) => (
-                <option key={college.id} value={college.id}>
-                  {college.name}
-                </option>
-              ))}
-            </select>
+        <div className="flex flex-col sm:flex-row gap-4 items-start sm:items-end">
+          <div className="flex-1 w-full">
+            <Input
+              label="Search Colleges"
+              placeholder="Search by name or code..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+            />
           </div>
-          <div className="flex items-end">
-            <Button
-              variant="ghost"
-              onClick={() => {
-                setSearchName("");
-                setFilterCollegeId("");
-              }}
-            >
-              Clear Filters
-            </Button>
+          <div className="text-sm text-gray-500">
+            Showing {filteredColleges.length} of {collegesData.length} colleges
           </div>
         </div>
       </Card>
 
-      {/* Results */}
-      {filteredSessions.length === 0 ? (
+      {/* Legend */}
+      <div className="flex flex-wrap gap-4 mb-6 text-sm">
+        <div className="flex items-center gap-2">
+          <span className="w-3 h-3 rounded-full bg-emerald-500" />
+          <span className="text-gray-600">≥80% Compliant</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="w-3 h-3 rounded-full bg-amber-500" />
+          <span className="text-gray-600">50-79% Compliant</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="w-3 h-3 rounded-full bg-red-500" />
+          <span className="text-gray-600">&lt;50% Compliant</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="w-3 h-3 rounded-full bg-gray-300" />
+          <span className="text-gray-600">No Data</span>
+        </div>
+      </div>
+
+      {/* College Accordions */}
+      {filteredColleges.length === 0 ? (
         <Card className="text-center py-12">
           <svg
             className="w-16 h-16 text-gray-300 mx-auto mb-4"
@@ -250,170 +320,81 @@ export default function Responses() {
               strokeLinecap="round"
               strokeLinejoin="round"
               strokeWidth={2}
-              d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+              d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"
             />
           </svg>
           <h3 className="text-lg font-medium text-gray-900 mb-2">
-            No responses found
+            {searchTerm ? "No colleges found" : "No college accounts yet"}
           </h3>
           <p className="text-gray-500">
-            {searchName || filterCollegeId
-              ? "Try adjusting your filters"
-              : "No evaluations have been submitted yet"}
+            {searchTerm
+              ? "Try adjusting your search term"
+              : "Create college accounts to track compliance"}
           </p>
         </Card>
       ) : (
-        <div className="space-y-3">
-          {filteredSessions.map((session) => (
-            <Card
-              key={session.id}
-              className="flex flex-col sm:flex-row sm:items-center gap-4"
-            >
-              <div className="flex items-center gap-4 flex-1 min-w-0">
-                <div className="w-10 h-10 bg-maroon-100 text-maroon-800 rounded-full flex items-center justify-center shrink-0 font-medium">
-                  {session.guest_name?.[0]?.toUpperCase() || "?"}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <h3 className="font-semibold text-gray-900 truncate">
-                    {session.guest_name || "Anonymous"}
-                  </h3>
-                  <div className="flex items-center gap-2 text-sm text-gray-500">
-                    <span>{session.colleges?.name || "Unknown College"}</span>
-                    <span>•</span>
-                    <span>{formatDate(session.completed_at)}</span>
+        <div className="space-y-4">
+          {filteredColleges.map((collegeData) => (
+            <ComplianceAccordion
+              key={collegeData.college.id}
+              title={collegeData.college.name}
+              subtitle={collegeData.college.code || undefined}
+              compliance={collegeData.overallCompliance}
+              level="college"
+              icon={
+                collegeData.college.avatar_url ? (
+                  <img
+                    src={collegeData.college.avatar_url}
+                    alt={collegeData.college.name}
+                    className="w-10 h-10 rounded-lg object-cover"
+                  />
+                ) : (
+                  <div className="w-10 h-10 rounded-lg bg-maroon-100 text-maroon-800 flex items-center justify-center font-bold text-lg">
+                    {collegeData.college.code?.[0] ||
+                      collegeData.college.name[0]}
                   </div>
-                  {session.responses && session.responses.length > 0 && (
-                    <div className="mt-1 flex flex-wrap gap-1">
-                      {[
-                        ...new Set(
-                          session.responses
-                            .map((r) => r.questions?.areas)
-                            .filter(Boolean)
-                            .map((a) => `Area ${a?.area_number}`)
-                        ),
-                      ].map((areaLabel) => (
-                        <span
-                          key={areaLabel}
-                          className="px-2 py-0.5 my-0.5 bg-maroon-50 text-maroon-700 text-xs rounded"
-                        >
-                          {areaLabel}
-                        </span>
-                      ))}
-                    </div>
-                  )}
+                )
+              }
+            >
+              {/* Area Accordions */}
+              {collegeData.areas.length === 0 ? (
+                <p className="text-gray-500 text-sm py-4">
+                  No evaluation areas configured
+                </p>
+              ) : (
+                <div className="space-y-3">
+                  {collegeData.areas.map((areaData) => (
+                    <ComplianceAccordion
+                      key={areaData.area.id}
+                      title={`Area ${areaData.area.area_number}: ${areaData.area.name}`}
+                      subtitle={areaData.area.description || undefined}
+                      compliance={areaData.compliance}
+                      level="area"
+                    >
+                      {/* Question Tree */}
+                      {areaData.questions.length === 0 ? (
+                        <p className="text-gray-500 text-sm py-4">
+                          No questions in this area
+                        </p>
+                      ) : (
+                        <div className="space-y-2">
+                          {areaData.questions.map((questionNode) => (
+                            <QuestionComplianceTree
+                              key={questionNode.id}
+                              node={questionNode}
+                              depth={0}
+                            />
+                          ))}
+                        </div>
+                      )}
+                    </ComplianceAccordion>
+                  ))}
                 </div>
-              </div>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => openDetailModal(session)}
-              >
-                <svg
-                  className="w-4 h-4"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
-                  />
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"
-                  />
-                </svg>
-                View Details
-              </Button>
-            </Card>
+              )}
+            </ComplianceAccordion>
           ))}
         </div>
       )}
-
-      <div className="mt-4 text-sm text-gray-500 text-center">
-        Showing {filteredSessions.length} of {sessions.length} responses
-      </div>
-
-      {/* Detail Modal */}
-      <Modal
-        isOpen={isDetailOpen}
-        onClose={() => setIsDetailOpen(false)}
-        title="Response Details"
-        size="lg"
-      >
-        {selectedSession && (
-          <div>
-            <div className="bg-gray-50 rounded-lg p-4 mb-6">
-              <div className="grid gap-2 sm:grid-cols-2">
-                <div>
-                  <span className="text-sm text-gray-500">Name:</span>
-                  <p className="font-medium">
-                    {selectedSession.guest_name || "Anonymous"}
-                  </p>
-                </div>
-                <div>
-                  <span className="text-sm text-gray-500">College:</span>
-                  <p className="font-medium">
-                    {selectedSession.colleges?.name || "Unknown"}
-                  </p>
-                </div>
-                <div>
-                  <span className="text-sm text-gray-500">Submitted:</span>
-                  <p className="font-medium">
-                    {formatDate(selectedSession.completed_at)}
-                  </p>
-                </div>
-              </div>
-            </div>
-
-            {isLoadingDetails ? (
-              <div className="flex justify-center py-8">
-                <Loading text="Loading responses..." />
-              </div>
-            ) : sessionResponses.length === 0 ? (
-              <p className="text-center text-gray-500 py-8">
-                No responses recorded for this session
-              </p>
-            ) : (
-              <div className="space-y-4 max-h-[400px] overflow-y-auto">
-                {sessionResponses.map((response, index) => (
-                  <div
-                    key={response.id}
-                    className="border-b border-gray-100 pb-4 last:border-0"
-                  >
-                    <div className="flex items-start gap-3">
-                      <div className="w-6 h-6 bg-gray-100 rounded text-xs flex items-center justify-center shrink-0 font-medium">
-                        {index + 1}
-                      </div>
-                      <div className="flex-1">
-                        <p className="text-sm text-gray-500 mb-1">
-                          Area {response.questions?.areas?.area_number}:{" "}
-                          {response.questions?.areas?.name}
-                        </p>
-                        <p className="text-gray-900 mb-2">
-                          {response.questions?.question_text}
-                        </p>
-                        <div className="flex items-center gap-3">
-                          {getStatusBadge(response.status)}
-                          {response.comment && (
-                            <span className="text-sm text-gray-500 italic">
-                              "{response.comment}"
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-      </Modal>
     </div>
   );
 }

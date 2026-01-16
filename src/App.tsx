@@ -15,6 +15,7 @@ import {
   Colleges,
   Responses,
   Reports,
+  PreviewCollege,
 } from "./pages/admin";
 
 // Root redirect component
@@ -63,6 +64,7 @@ function App() {
             <Route path="colleges" element={<Colleges />} />
             <Route path="responses" element={<Responses />} />
             <Route path="reports" element={<Reports />} />
+            <Route path="preview-college" element={<PreviewCollege />} />
           </Route>
 
           {/* College Routes */}
