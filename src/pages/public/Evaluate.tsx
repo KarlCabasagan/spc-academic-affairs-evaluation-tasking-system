@@ -22,12 +22,306 @@ interface QuestionResponse extends ResponseFormData {
   answered: boolean;
 }
 
+// Build hierarchical tree from flat question array
+function buildQuestionTree(questions: Question[]): Question[] {
+  const questionMap = new Map<string, Question>();
+  const roots: Question[] = [];
+
+  // Initialize all questions in map with empty children
+  questions.forEach((q) => {
+    questionMap.set(q.id, { ...q, children: [] });
+  });
+
+  // Build tree structure
+  questions.forEach((q) => {
+    const question = questionMap.get(q.id)!;
+    if (q.parent_id && questionMap.has(q.parent_id)) {
+      const parent = questionMap.get(q.parent_id)!;
+      parent.children = parent.children || [];
+      parent.children.push(question);
+    } else {
+      roots.push(question);
+    }
+  });
+
+  // Sort children by question_order
+  const sortChildren = (items: Question[]) => {
+    items.sort((a, b) => a.question_order - b.question_order);
+    items.forEach((item) => {
+      if (item.children && item.children.length > 0) {
+        sortChildren(item.children);
+      }
+    });
+  };
+  sortChildren(roots);
+
+  // Assign hierarchical numbers
+  const assignNumbers = (items: Question[], prefix: string = "") => {
+    items.forEach((item, index) => {
+      const num = prefix ? `${prefix}.${index + 1}` : `${index + 1}`;
+      item.hierarchical_number = num;
+      if (item.children && item.children.length > 0) {
+        assignNumbers(item.children, num);
+      }
+    });
+  };
+  assignNumbers(roots);
+
+  return roots;
+}
+
+// Get all leaf questions (for response counting)
+function getLeafQuestions(questions: Question[]): Question[] {
+  const leaves: Question[] = [];
+  const traverse = (items: Question[]) => {
+    items.forEach((item) => {
+      if (!item.children || item.children.length === 0) {
+        leaves.push(item);
+      } else {
+        traverse(item.children);
+      }
+    });
+  };
+  traverse(questions);
+  return leaves;
+}
+
+// Recursive question component
+interface QuestionItemProps {
+  question: Question;
+  depth: number;
+  responses: Map<string, QuestionResponse>;
+  onStatusChange: (questionId: string, status: ComplianceStatus) => void;
+  onCommentChange: (questionId: string, comment: string) => void;
+}
+
+function QuestionItem({
+  question,
+  depth,
+  responses,
+  onStatusChange,
+  onCommentChange,
+}: QuestionItemProps) {
+  const hasChildren = question.children && question.children.length > 0;
+  const response = responses.get(question.id);
+
+  // Calculate responsive indentation (reduced on mobile)
+  // Desktop: 16px per level (max 4 levels = 64px)
+  // Mobile: 8px per level (max 2 levels = 16px)
+  const effectiveDepth = Math.min(depth, 4);
+
+  // Parent questions (with children) are rendered as description headings
+  if (hasChildren) {
+    return (
+      <div className="space-y-4">
+        {/* Section Header */}
+        <div
+          className={`
+            ${depth === 0 ? "mt-6" : "mt-4"}
+            relative
+          `}
+          style={{
+            marginLeft: `${Math.min(effectiveDepth, 2) * 8}px`,
+            paddingLeft: effectiveDepth > 0 ? "16px" : "0",
+          }}
+        >
+          {/* Vertical connector line */}
+          {depth > 0 && (
+            <div
+              className="absolute left-0 top-0 bottom-0 w-0.5 bg-maroon-200"
+              style={{ left: "-1px" }}
+            />
+          )}
+
+          <div className="flex items-start gap-3 bg-maroon-50/50 rounded-lg p-4 border border-maroon-100">
+            <span className="shrink-0 px-3 py-1.5 bg-maroon-600 text-white rounded-lg text-sm font-bold shadow-sm">
+              {question.hierarchical_number}
+            </span>
+            <div className="flex-1">
+              <h3 className="font-semibold text-gray-800 text-lg leading-snug">
+                {question.question_text}
+              </h3>
+              <p className="text-sm text-maroon-600 mt-1 font-medium">
+                {question.children!.length} sub-item
+                {question.children!.length > 1 ? "s" : ""} in this section
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {/* Render children */}
+        <div
+          className="space-y-4 relative"
+          style={{
+            marginLeft: `${Math.min(effectiveDepth + 1, 3) * 8}px`,
+            paddingLeft: "16px",
+          }}
+        >
+          {/* Vertical connector line for children group */}
+          <div
+            className="absolute left-0 top-0 w-0.5 bg-maroon-200"
+            style={{ left: "-1px", bottom: "40px" }}
+          />
+
+          {question.children!.map((child, index) => (
+            <QuestionItem
+              key={child.id}
+              question={child}
+              depth={depth + 1}
+              responses={responses}
+              onStatusChange={onStatusChange}
+              onCommentChange={onCommentChange}
+            />
+          ))}
+
+          {/* End of Section Indicator */}
+          <div
+            className="flex items-center gap-3 py-3 border-t border-dashed border-gray-300"
+            style={{
+              marginLeft: "-16px",
+              paddingLeft: "16px",
+            }}
+          >
+            <div className="flex-1 h-px bg-gradient-to-r from-maroon-200 to-transparent" />
+            <span className="text-xs text-gray-400 font-medium whitespace-nowrap">
+              End of Section {question.hierarchical_number}
+            </span>
+            <div className="flex-1 h-px bg-gradient-to-l from-maroon-200 to-transparent" />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Leaf questions (no children) are interactive
+  return (
+    <Card
+      className={`transition-all duration-200 ${
+        response?.answered ? "border-maroon-200 bg-maroon-50/30" : ""
+      }`}
+      style={{
+        marginLeft: depth > 0 ? `${Math.min(effectiveDepth, 3) * 8}px` : "0",
+      }}
+    >
+      <div className="flex flex-col sm:flex-row sm:items-start gap-4">
+        <div className="shrink-0 w-auto px-2 py-1 bg-gray-100 text-gray-600 rounded-lg text-sm font-medium">
+          {question.hierarchical_number}
+        </div>
+        <div className="flex-1">
+          <p className="text-gray-900 font-medium mb-4">
+            {question.question_text}
+            {question.is_required && (
+              <span className="text-red-500 ml-1">*</span>
+            )}
+          </p>
+
+          {/* Response Buttons - Stack on mobile for better touch targets */}
+          <div className="flex flex-col sm:flex-row flex-wrap gap-2 mb-4">
+            <button
+              onClick={() => onStatusChange(question.id, "complied")}
+              className={`
+                px-4 py-3 sm:py-2 rounded-lg text-sm font-medium transition-all duration-200
+                flex items-center justify-center sm:justify-start gap-2
+                ${
+                  response?.status === "complied" && response?.answered
+                    ? "bg-green-600 text-white ring-2 ring-green-300"
+                    : "bg-green-50 text-green-700 hover:bg-green-100 border border-green-200"
+                }
+              `}
+            >
+              <svg
+                className="w-4 h-4"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M5 13l4 4L19 7"
+                />
+              </svg>
+              Complied
+            </button>
+            <button
+              onClick={() => onStatusChange(question.id, "not_complied")}
+              className={`
+                px-4 py-3 sm:py-2 rounded-lg text-sm font-medium transition-all duration-200
+                flex items-center justify-center sm:justify-start gap-2
+                ${
+                  response?.status === "not_complied" && response?.answered
+                    ? "bg-red-600 text-white ring-2 ring-red-300"
+                    : "bg-red-50 text-red-700 hover:bg-red-100 border border-red-200"
+                }
+              `}
+            >
+              <svg
+                className="w-4 h-4"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M6 18L18 6M6 6l12 12"
+                />
+              </svg>
+              Not Complied
+            </button>
+            <button
+              onClick={() => onStatusChange(question.id, "not_applicable")}
+              className={`
+                px-4 py-3 sm:py-2 rounded-lg text-sm font-medium transition-all duration-200
+                flex items-center justify-center sm:justify-start gap-2
+                ${
+                  response?.status === "not_applicable" && response?.answered
+                    ? "bg-gray-600 text-white ring-2 ring-gray-300"
+                    : "bg-gray-50 text-gray-700 hover:bg-gray-100 border border-gray-200"
+                }
+              `}
+            >
+              <svg
+                className="w-4 h-4"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M20 12H4"
+                />
+              </svg>
+              Not Applicable
+            </button>
+          </div>
+
+          {/* Comment Field */}
+          <Textarea
+            placeholder="Add a comment (optional)..."
+            value={response?.comment || ""}
+            onChange={(e) => onCommentChange(question.id, e.target.value)}
+            className="text-sm"
+            rows={2}
+          />
+        </div>
+      </div>
+    </Card>
+  );
+}
+
 export default function Evaluate() {
   const { areaId } = useParams<{ areaId: string }>();
   const navigate = useNavigate();
 
   const [area, setArea] = useState<Area | null>(null);
   const [questions, setQuestions] = useState<Question[]>([]);
+  const [questionTree, setQuestionTree] = useState<Question[]>([]);
+  const [leafQuestions, setLeafQuestions] = useState<Question[]>([]);
   const [responses, setResponses] = useState<Map<string, QuestionResponse>>(
     new Map()
   );
@@ -88,9 +382,15 @@ export default function Evaluate() {
       if (questionsError) throw questionsError;
       setQuestions(questionsData || []);
 
-      // Initialize responses map
+      // Build tree and get leaves
+      const tree = buildQuestionTree(questionsData || []);
+      setQuestionTree(tree);
+      const leaves = getLeafQuestions(tree);
+      setLeafQuestions(leaves);
+
+      // Initialize responses map for leaf questions only
       const initialResponses = new Map<string, QuestionResponse>();
-      questionsData?.forEach((q) => {
+      leaves.forEach((q) => {
         initialResponses.set(q.id, {
           question_id: q.id,
           status: "not_applicable",
@@ -136,7 +436,7 @@ export default function Evaluate() {
   };
 
   const getRequiredUnanswered = () => {
-    return questions.filter(
+    return leafQuestions.filter(
       (q) => q.is_required && !responses.get(q.id)?.answered
     );
   };
@@ -177,7 +477,7 @@ export default function Evaluate() {
 
       if (sessionError) throw sessionError;
 
-      // Insert responses
+      // Insert responses (only leaf questions with answers)
       const responsesToInsert = Array.from(responses.entries())
         .filter(([, r]) => r.answered)
         .map(([, r]) => ({
@@ -292,11 +592,11 @@ export default function Evaluate() {
         <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
           <div className="flex items-center justify-between mb-2">
             <span className="text-sm font-medium text-gray-700">
-              Progress: {getAnsweredCount()} of {questions.length} answered
+              Progress: {getAnsweredCount()} of {leafQuestions.length} answered
             </span>
             <span className="text-sm text-gray-500">
               {Math.round(
-                (getAnsweredCount() / Math.max(questions.length, 1)) * 100
+                (getAnsweredCount() / Math.max(leafQuestions.length, 1)) * 100
               )}
               %
             </span>
@@ -306,7 +606,7 @@ export default function Evaluate() {
               className="h-full bg-maroon-800 transition-all duration-300 rounded-full"
               style={{
                 width: `${
-                  (getAnsweredCount() / Math.max(questions.length, 1)) * 100
+                  (getAnsweredCount() / Math.max(leafQuestions.length, 1)) * 100
                 }%`,
               }}
             />
@@ -371,8 +671,8 @@ export default function Evaluate() {
       </div>
 
       {/* Questions */}
-      <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 pb-8">
-        {questions.length === 0 ? (
+      <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 pb-8 overflow-x-hidden">
+        {questionTree.length === 0 ? (
           <Card className="text-center py-12">
             <svg
               className="w-16 h-16 text-gray-300 mx-auto mb-4"
@@ -395,145 +695,23 @@ export default function Evaluate() {
             </Link>
           </Card>
         ) : (
-          <div className="space-y-6">
-            {questions.map((question, index) => {
-              const response = responses.get(question.id);
-              return (
-                <Card
-                  key={question.id}
-                  className={`transition-all duration-200 ${
-                    response?.answered
-                      ? "border-maroon-200 bg-maroon-50/30"
-                      : ""
-                  }`}
-                >
-                  <div className="flex items-start gap-4">
-                    <div className="shrink-0 w-8 h-8 bg-gray-100 text-gray-600 rounded-lg flex items-center justify-center text-sm font-medium">
-                      {index + 1}
-                    </div>
-                    <div className="flex-1">
-                      <p className="text-gray-900 font-medium mb-4">
-                        {question.question_text}
-                        {question.is_required && (
-                          <span className="text-red-500 ml-1">*</span>
-                        )}
-                      </p>
-
-                      {/* Response Buttons */}
-                      <div className="flex flex-wrap gap-2 mb-4">
-                        <button
-                          onClick={() =>
-                            handleStatusChange(question.id, "complied")
-                          }
-                          className={`
-                            px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200
-                            flex items-center gap-2
-                            ${
-                              response?.status === "complied" &&
-                              response?.answered
-                                ? "bg-green-600 text-white ring-2 ring-green-300"
-                                : "bg-green-50 text-green-700 hover:bg-green-100 border border-green-200"
-                            }
-                          `}
-                        >
-                          <svg
-                            className="w-4 h-4"
-                            fill="none"
-                            stroke="currentColor"
-                            viewBox="0 0 24 24"
-                          >
-                            <path
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                              strokeWidth={2}
-                              d="M5 13l4 4L19 7"
-                            />
-                          </svg>
-                          Complied
-                        </button>
-                        <button
-                          onClick={() =>
-                            handleStatusChange(question.id, "not_complied")
-                          }
-                          className={`
-                            px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200
-                            flex items-center gap-2
-                            ${
-                              response?.status === "not_complied" &&
-                              response?.answered
-                                ? "bg-red-600 text-white ring-2 ring-red-300"
-                                : "bg-red-50 text-red-700 hover:bg-red-100 border border-red-200"
-                            }
-                          `}
-                        >
-                          <svg
-                            className="w-4 h-4"
-                            fill="none"
-                            stroke="currentColor"
-                            viewBox="0 0 24 24"
-                          >
-                            <path
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                              strokeWidth={2}
-                              d="M6 18L18 6M6 6l12 12"
-                            />
-                          </svg>
-                          Not Complied
-                        </button>
-                        <button
-                          onClick={() =>
-                            handleStatusChange(question.id, "not_applicable")
-                          }
-                          className={`
-                            px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200
-                            flex items-center gap-2
-                            ${
-                              response?.status === "not_applicable" &&
-                              response?.answered
-                                ? "bg-gray-600 text-white ring-2 ring-gray-300"
-                                : "bg-gray-50 text-gray-700 hover:bg-gray-100 border border-gray-200"
-                            }
-                          `}
-                        >
-                          <svg
-                            className="w-4 h-4"
-                            fill="none"
-                            stroke="currentColor"
-                            viewBox="0 0 24 24"
-                          >
-                            <path
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                              strokeWidth={2}
-                              d="M20 12H4"
-                            />
-                          </svg>
-                          Not Applicable
-                        </button>
-                      </div>
-
-                      {/* Comment Field */}
-                      <Textarea
-                        placeholder="Add a comment (optional)..."
-                        value={response?.comment || ""}
-                        onChange={(e) =>
-                          handleCommentChange(question.id, e.target.value)
-                        }
-                        className="text-sm"
-                        rows={2}
-                      />
-                    </div>
-                  </div>
-                </Card>
-              );
-            })}
+          <div className="space-y-4">
+            {questionTree.map((question) => (
+              <QuestionItem
+                key={question.id}
+                question={question}
+                depth={0}
+                responses={responses}
+                onStatusChange={handleStatusChange}
+                onCommentChange={handleCommentChange}
+              />
+            ))}
           </div>
         )}
       </div>
 
       {/* Submit Footer */}
-      {questions.length > 0 && (
+      {leafQuestions.length > 0 && (
         <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 shadow-lg z-30">
           <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
             <div className="flex items-center justify-between gap-4">

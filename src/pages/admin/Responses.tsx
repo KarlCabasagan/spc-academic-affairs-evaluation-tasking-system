@@ -124,7 +124,7 @@ export default function Responses() {
         .order("created_at", { ascending: true });
 
       if (error) throw error;
-      setSessionResponses(data || []);
+      setSessionResponses((data as unknown as ResponseDetail[]) || []);
     } catch (err) {
       console.error("Error fetching responses:", err);
       showToast("Failed to load response details", "error");

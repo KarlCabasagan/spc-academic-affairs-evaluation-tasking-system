@@ -34,10 +34,11 @@ CREATE TABLE areas (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Questions Table: Evaluation questions per area
+-- Questions Table: Evaluation questions per area (hierarchical structure)
 CREATE TABLE questions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     area_id UUID NOT NULL REFERENCES areas(id) ON DELETE CASCADE,
+    parent_id UUID REFERENCES questions(id) ON DELETE CASCADE, -- Self-reference for nesting
     question_text TEXT NOT NULL,
     question_order INTEGER NOT NULL,
     is_required BOOLEAN DEFAULT true,
@@ -87,6 +88,7 @@ ALTER TABLE evaluation_sessions ADD COLUMN college_id UUID REFERENCES colleges(i
 -- Indexes for Performance
 -- ============================================
 CREATE INDEX idx_questions_area_id ON questions(area_id);
+CREATE INDEX idx_questions_parent_id ON questions(parent_id);
 CREATE INDEX idx_responses_session_id ON responses(session_id);
 CREATE INDEX idx_responses_question_id ON responses(question_id);
 

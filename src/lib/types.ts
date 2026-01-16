@@ -15,12 +15,15 @@ export interface Area {
 export interface Question {
   id: string;
   area_id: string;
+  parent_id: string | null;
   question_text: string;
   question_order: number;
   is_required: boolean;
   is_active: boolean;
   created_at: string;
   updated_at: string;
+  children?: Question[];
+  hierarchical_number?: string;
 }
 
 export interface College {
@@ -61,6 +64,7 @@ export interface AreaFormData {
 
 export interface QuestionFormData {
   area_id: string;
+  parent_id?: string | null;
   question_text: string;
   question_order: number;
   is_required?: boolean;

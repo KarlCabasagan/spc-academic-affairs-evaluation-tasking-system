@@ -68,7 +68,7 @@ export default function Reports() {
         .order("question_order", { ascending: true });
 
       if (questionsError) throw questionsError;
-      setQuestions(questionsData || []);
+      setQuestions((questionsData as unknown as QuestionWithArea[]) || []);
 
       // Fetch all responses with session info
       const { data: responsesData, error: responsesError } =
@@ -79,13 +79,13 @@ export default function Reports() {
         `);
 
       if (responsesError) throw responsesError;
-      setResponses(responsesData || []);
+      setResponses((responsesData as unknown as ResponseData[]) || []);
 
       // Build pivot data
       buildPivotData(
         collegesData || [],
-        questionsData || [],
-        responsesData || []
+        (questionsData as unknown as QuestionWithArea[]) || [],
+        (responsesData as unknown as ResponseData[]) || []
       );
     } catch (error) {
       console.error("Error fetching data:", error);
