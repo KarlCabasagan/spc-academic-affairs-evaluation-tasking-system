@@ -7,7 +7,7 @@ import { Button, Input, Card, Loading } from "../../components/ui";
 
 export default function Login() {
   const navigate = useNavigate();
-  const { user, isLoading, signIn } = useAuth();
+  const { user, userRole, isLoading, signIn } = useAuth();
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -27,13 +27,15 @@ export default function Login() {
       setHasAdmin((data || 0) > 0);
     } catch (err) {
       console.error("Error checking admin:", err);
-      // If function doesn't exist, assume no admin
       setHasAdmin(false);
     }
   };
 
-  // Redirect if already logged in
-  if (!isLoading && user) {
+  // Redirect based on role if already logged in
+  if (!isLoading && user && userRole) {
+    if (userRole === "college") {
+      return <Navigate to="/college" replace />;
+    }
     return <Navigate to="/admin/dashboard" replace />;
   }
 
@@ -43,7 +45,7 @@ export default function Login() {
   }
 
   // Loading state while checking
-  if (hasAdmin === null) {
+  if (hasAdmin === null || isLoading) {
     return (
       <div className="min-h-screen bg-linear-to-br from-maroon-800 via-maroon-900 to-maroon-950 flex items-center justify-center">
         <Loading size="lg" text="Loading..." />
@@ -71,9 +73,8 @@ export default function Login() {
         } else {
           setError(error.message || "Invalid email or password");
         }
-      } else {
-        navigate("/admin/dashboard");
       }
+      // Navigation is handled by AuthContext role detection
     } catch {
       setError("An unexpected error occurred. Please try again.");
     } finally {
@@ -101,7 +102,7 @@ export default function Login() {
               />
             </svg>
           </div>
-          <h1 className="text-2xl font-bold text-white">Admin Login</h1>
+          <h1 className="text-2xl font-bold text-white">Sign In</h1>
           <p className="text-maroon-200 mt-2">
             Academic Affairs Evaluation System
           </p>
@@ -132,7 +133,7 @@ export default function Login() {
             <Input
               label="Email Address"
               type="email"
-              placeholder="admin@example.com"
+              placeholder="email@example.com"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               autoComplete="email"
@@ -149,6 +150,15 @@ export default function Login() {
               required
             />
 
+            <div className="flex justify-end">
+              <Link
+                to="/forgot-password"
+                className="text-sm text-maroon-600 hover:text-maroon-800 transition-colors"
+              >
+                Forgot password?
+              </Link>
+            </div>
+
             <Button
               type="submit"
               className="w-full"
@@ -160,14 +170,11 @@ export default function Login() {
           </form>
         </Card>
 
-        {/* Back Link */}
+        {/* Info text */}
         <div className="text-center mt-6">
-          <Link
-            to="/"
-            className="text-sm text-maroon-200! hover:text-white! transition-colors"
-          >
-            ← Back to Evaluation Portal
-          </Link>
+          <p className="text-sm text-maroon-200">
+            Admin and College accounts can sign in here
+          </p>
         </div>
       </div>
     </div>

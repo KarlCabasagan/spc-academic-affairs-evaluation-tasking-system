@@ -47,10 +47,24 @@ CREATE TABLE questions (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Evaluation Sessions: Track anonymous evaluation submissions
+-- Colleges Table: Organizational units with authentication
+CREATE TABLE colleges (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES auth.users(id) ON DELETE SET NULL, -- Links to Supabase auth
+    name VARCHAR(255) NOT NULL UNIQUE,
+    code VARCHAR(50), -- Department code e.g., "CCS", "COE"
+    avatar_url TEXT,
+    parent_id UUID REFERENCES colleges(id) ON DELETE SET NULL, -- For future department support
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Evaluation Sessions: Track authenticated evaluation submissions
 CREATE TABLE evaluation_sessions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     session_token VARCHAR(255) UNIQUE NOT NULL,
+    college_id UUID REFERENCES colleges(id), -- Linked to authenticated college
     started_at TIMESTAMPTZ DEFAULT NOW(),
     completed_at TIMESTAMPTZ,
     is_complete BOOLEAN DEFAULT false
@@ -59,7 +73,7 @@ CREATE TABLE evaluation_sessions (
 -- Compliance Status Enum
 CREATE TYPE compliance_status AS ENUM ('complied', 'not_complied', 'not_applicable');
 
--- Responses Table: Anonymous user responses
+-- Responses Table: College user responses
 CREATE TABLE responses (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     session_id UUID NOT NULL REFERENCES evaluation_sessions(id) ON DELETE CASCADE,
@@ -70,20 +84,6 @@ CREATE TABLE responses (
     UNIQUE(session_id, question_id)
 );
 
--- Colleges Table: Organizational units for guest identification
-CREATE TABLE colleges (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name VARCHAR(255) NOT NULL UNIQUE,
-    parent_id UUID REFERENCES colleges(id) ON DELETE SET NULL,  -- For future department support
-    is_active BOOLEAN DEFAULT true,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- Add guest identification columns to evaluation_sessions
-ALTER TABLE evaluation_sessions ADD COLUMN guest_name VARCHAR(255);
-ALTER TABLE evaluation_sessions ADD COLUMN college_id UUID REFERENCES colleges(id);
-
 -- ============================================
 -- Indexes for Performance
 -- ============================================
@@ -91,6 +91,8 @@ CREATE INDEX idx_questions_area_id ON questions(area_id);
 CREATE INDEX idx_questions_parent_id ON questions(parent_id);
 CREATE INDEX idx_responses_session_id ON responses(session_id);
 CREATE INDEX idx_responses_question_id ON responses(question_id);
+CREATE INDEX idx_colleges_user_id ON colleges(user_id);
+CREATE INDEX idx_sessions_college_id ON evaluation_sessions(college_id);
 
 -- ============================================
 -- Updated At Trigger Function
@@ -115,8 +117,51 @@ CREATE TRIGGER update_colleges_updated_at
     BEFORE UPDATE ON colleges
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
--- Index for session lookups by college
-CREATE INDEX idx_sessions_college_id ON evaluation_sessions(college_id);
+-- ============================================
+-- Function to get user role
+-- ============================================
+CREATE OR REPLACE FUNCTION public.get_user_role(user_uuid UUID)
+RETURNS TEXT
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  -- Check if user is linked to a college
+  IF EXISTS (SELECT 1 FROM colleges WHERE user_id = user_uuid AND is_active = true) THEN
+    RETURN 'college';
+  ELSE
+    RETURN 'admin';
+  END IF;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.get_user_role(UUID) TO authenticated;
+
+-- ============================================
+-- Function to get college by user ID
+-- ============================================
+CREATE OR REPLACE FUNCTION public.get_college_by_user(user_uuid UUID)
+RETURNS TABLE (
+  id UUID,
+  name VARCHAR,
+  code VARCHAR,
+  avatar_url TEXT
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  RETURN QUERY
+  SELECT c.id, c.name, c.code, c.avatar_url
+  FROM colleges c
+  WHERE c.user_id = user_uuid AND c.is_active = true
+  LIMIT 1;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.get_college_by_user(UUID) TO authenticated;
 
 -- ============================================
 -- Row Level Security Policies
@@ -129,76 +174,87 @@ ALTER TABLE evaluation_sessions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE responses ENABLE ROW LEVEL SECURITY;
 ALTER TABLE colleges ENABLE ROW LEVEL SECURITY;
 
--- Areas: Admin can do everything, anonymous can only read active areas
+-- Areas: Authenticated users can read all active areas, Admin can manage
 CREATE POLICY "Admin full access to areas"
 ON areas FOR ALL
 TO authenticated
-USING (true)
-WITH CHECK (true);
+USING (public.get_user_role(auth.uid()) = 'admin')
+WITH CHECK (public.get_user_role(auth.uid()) = 'admin');
 
-CREATE POLICY "Anonymous can read active areas"
+CREATE POLICY "Authenticated can read active areas"
 ON areas FOR SELECT
-TO anon
+TO authenticated
 USING (is_active = true);
 
--- Questions: Admin can do everything, anonymous can only read active questions
+-- Questions: Authenticated users can read all active questions, Admin can manage
 CREATE POLICY "Admin full access to questions"
 ON questions FOR ALL
 TO authenticated
-USING (true)
-WITH CHECK (true);
+USING (public.get_user_role(auth.uid()) = 'admin')
+WITH CHECK (public.get_user_role(auth.uid()) = 'admin');
 
-CREATE POLICY "Anonymous can read active questions"
+CREATE POLICY "Authenticated can read active questions"
 ON questions FOR SELECT
-TO anon
+TO authenticated
 USING (is_active = true);
 
--- Evaluation Sessions: Admin can read all, anonymous can insert and read own
+-- Evaluation Sessions: Admin can read all, College can manage own
 CREATE POLICY "Admin full access to sessions"
 ON evaluation_sessions FOR ALL
 TO authenticated
-USING (true)
-WITH CHECK (true);
+USING (public.get_user_role(auth.uid()) = 'admin')
+WITH CHECK (public.get_user_role(auth.uid()) = 'admin');
 
-CREATE POLICY "Anonymous can create sessions"
-ON evaluation_sessions FOR INSERT
-TO anon
-WITH CHECK (true);
+CREATE POLICY "College can manage own sessions"
+ON evaluation_sessions FOR ALL
+TO authenticated
+USING (
+  college_id IN (SELECT id FROM colleges WHERE user_id = auth.uid())
+)
+WITH CHECK (
+  college_id IN (SELECT id FROM colleges WHERE user_id = auth.uid())
+);
 
-CREATE POLICY "Anonymous can read own session"
-ON evaluation_sessions FOR SELECT
-TO anon
-USING (true);
-
-CREATE POLICY "Anonymous can update own session"
-ON evaluation_sessions FOR UPDATE
-TO anon
-USING (true)
-WITH CHECK (true);
-
--- Responses: Admin can read all, anonymous can insert
+-- Responses: Admin can read all, College can insert own
 CREATE POLICY "Admin full access to responses"
 ON responses FOR ALL
 TO authenticated
-USING (true)
-WITH CHECK (true);
+USING (public.get_user_role(auth.uid()) = 'admin')
+WITH CHECK (public.get_user_role(auth.uid()) = 'admin');
 
-CREATE POLICY "Anonymous can insert responses"
+CREATE POLICY "College can insert own responses"
 ON responses FOR INSERT
-TO anon
-WITH CHECK (true);
+TO authenticated
+WITH CHECK (
+  session_id IN (
+    SELECT es.id FROM evaluation_sessions es
+    JOIN colleges c ON es.college_id = c.id
+    WHERE c.user_id = auth.uid()
+  )
+);
 
--- Colleges: Admin can do everything, anonymous can only read active colleges
+CREATE POLICY "College can read own responses"
+ON responses FOR SELECT
+TO authenticated
+USING (
+  session_id IN (
+    SELECT es.id FROM evaluation_sessions es
+    JOIN colleges c ON es.college_id = c.id
+    WHERE c.user_id = auth.uid()
+  )
+);
+
+-- Colleges: Admin can manage all, users can read their own
 CREATE POLICY "Admin full access to colleges"
 ON colleges FOR ALL
 TO authenticated
-USING (true)
-WITH CHECK (true);
+USING (public.get_user_role(auth.uid()) = 'admin')
+WITH CHECK (public.get_user_role(auth.uid()) = 'admin');
 
-CREATE POLICY "Anonymous can read active colleges"
+CREATE POLICY "Authenticated can read own college"
 ON colleges FOR SELECT
-TO anon
-USING (is_active = true);
+TO authenticated
+USING (user_id = auth.uid() OR public.get_user_role(auth.uid()) = 'admin');
 
 -- ============================================
 -- Seed Default PACUCOA Areas

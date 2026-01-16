@@ -5,7 +5,7 @@ import Sidebar from "./Sidebar";
 import { Loading } from "../ui";
 
 export default function AdminLayout() {
-  const { user, isLoading } = useAuth();
+  const { user, userRole, isLoading } = useAuth();
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   if (isLoading) {
@@ -13,7 +13,12 @@ export default function AdminLayout() {
   }
 
   if (!user) {
-    return <Navigate to="/admin/login" replace />;
+    return <Navigate to="/login" replace />;
+  }
+
+  // Redirect college users to their portal
+  if (userRole === "college") {
+    return <Navigate to="/college" replace />;
   }
 
   return (

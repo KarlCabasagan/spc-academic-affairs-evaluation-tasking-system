@@ -2,6 +2,8 @@
 
 export type ComplianceStatus = "complied" | "not_complied" | "not_applicable";
 
+export type UserRole = "admin" | "college";
+
 export interface Area {
   id: string;
   area_number: number;
@@ -28,7 +30,10 @@ export interface Question {
 
 export interface College {
   id: string;
+  user_id: string | null; // Links to auth.users
   name: string;
+  code: string | null; // e.g., "CCS", "COE"
+  avatar_url: string | null;
   parent_id: string | null;
   is_active: boolean;
   created_at: string;
@@ -38,7 +43,6 @@ export interface College {
 export interface EvaluationSession {
   id: string;
   session_token: string;
-  guest_name: string | null;
   college_id: string | null;
   started_at: string;
   completed_at: string | null;
@@ -75,4 +79,12 @@ export interface ResponseFormData {
   question_id: string;
   status: ComplianceStatus;
   comment?: string;
+}
+
+export interface CollegeAccountFormData {
+  name: string;
+  code: string;
+  email: string;
+  password: string;
+  avatar_url?: string;
 }
