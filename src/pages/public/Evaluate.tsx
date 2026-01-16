@@ -163,7 +163,7 @@ function QuestionItem({
             style={{ left: "-1px", bottom: "40px" }}
           />
 
-          {question.children!.map((child, index) => (
+          {question.children!.map((child) => (
             <QuestionItem
               key={child.id}
               question={child}
@@ -182,11 +182,11 @@ function QuestionItem({
               paddingLeft: "16px",
             }}
           >
-            <div className="flex-1 h-px bg-gradient-to-r from-maroon-200 to-transparent" />
+            <div className="flex-1 h-px bg-linear-to-r from-maroon-200 to-transparent" />
             <span className="text-xs text-gray-400 font-medium whitespace-nowrap">
               End of Section {question.hierarchical_number}
             </span>
-            <div className="flex-1 h-px bg-gradient-to-l from-maroon-200 to-transparent" />
+            <div className="flex-1 h-px bg-linear-to-l from-maroon-200 to-transparent" />
           </div>
         </div>
       </div>
@@ -319,7 +319,7 @@ export default function Evaluate() {
   const navigate = useNavigate();
 
   const [area, setArea] = useState<Area | null>(null);
-  const [questions, setQuestions] = useState<Question[]>([]);
+  const [, setQuestions] = useState<Question[]>([]);
   const [questionTree, setQuestionTree] = useState<Question[]>([]);
   const [leafQuestions, setLeafQuestions] = useState<Question[]>([]);
   const [responses, setResponses] = useState<Map<string, QuestionResponse>>(

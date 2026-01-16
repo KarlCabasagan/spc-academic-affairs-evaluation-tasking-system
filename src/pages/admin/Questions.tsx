@@ -99,12 +99,6 @@ function getNextOrderNumber(
 }
 
 // Get indentation style based on depth (max 4 levels visually)
-function getIndentStyle(depth: number): string {
-  const maxVisualDepth = 4;
-  const effectiveDepth = Math.min(depth, maxVisualDepth);
-  // Progressive margin: 24px per level, max 96px
-  return `ml-${effectiveDepth * 6}`;
-}
 
 // Recursive question item component
 interface QuestionItemProps {

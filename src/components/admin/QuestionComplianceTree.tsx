@@ -154,7 +154,7 @@ export default function QuestionComplianceTree({
         </div>
 
         {/* Hierarchical Number */}
-        <span className="shrink-0 font-mono text-sm text-gray-500 min-w-[2rem]">
+        <span className="shrink-0 font-mono text-sm text-gray-500 min-w-8">
           {node.hierarchicalNumber}
         </span>
 
