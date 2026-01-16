@@ -21,18 +21,21 @@ interface ResponseData {
 interface SessionData {
   id: string;
   college_id: string;
+  completed_at: string | null; // For SSOT ordering
   responses: ResponseData[];
 }
 
 interface AreaComplianceData {
   area: Area;
-  compliance: number | null;
+  compliance: number | null; // null = no questions in area (exclude from overall)
+  hasQuestions: boolean; // Track if area has any questions
+  displayState: "no_questions" | "all_na" | "normal"; // For UI display
   questions: QuestionComplianceNode[];
 }
 
 interface CollegeComplianceData {
   college: College;
-  overallCompliance: number | null;
+  overallCompliance: number | null; // null only if ALL areas have no questions
   areas: AreaComplianceData[];
 }
 
@@ -74,13 +77,14 @@ export default function Responses() {
 
       if (questionsError) throw questionsError;
 
-      // Fetch all completed sessions with responses
+      // Fetch all completed sessions with responses and completed_at for SSOT
       const { data: sessions, error: sessionsError } = await supabase
         .from("evaluation_sessions")
         .select(
           `
           id,
           college_id,
+          completed_at,
           responses (
             id,
             question_id,
@@ -89,59 +93,124 @@ export default function Responses() {
           )
         `
         )
-        .eq("is_complete", true);
+        .eq("is_complete", true)
+        .order("completed_at", { ascending: false }); // Most recent first
 
       if (sessionsError) throw sessionsError;
 
       // Process data for each college
       const processedData: CollegeComplianceData[] = (colleges || []).map(
         (college) => {
-          // Get all sessions for this college
+          // Get all sessions for this college (ordered by most recent first)
           const collegeSessions = (sessions || []).filter(
             (s: SessionData) => s.college_id === college.id
           );
 
-          // Aggregate all responses for this college
-          const allResponses: ResponseData[] = [];
+          // SSOT: For each area, use ONLY the most recent session's responses
+          // Create a map: area_id -> Map<question_id, response>
+          const areaResponseMaps = new Map<string, Map<string, ResponseData>>();
+
+          // Initialize areas
+          (areas || []).forEach((area) => {
+            areaResponseMaps.set(area.id, new Map());
+          });
+
+          // Process sessions (most recent first due to ordering)
+          // For each area, track which sessions we've already seen
+          const processedAreaSessions = new Map<string, boolean>();
+
           collegeSessions.forEach((session: SessionData) => {
-            if (session.responses) {
-              allResponses.push(...session.responses);
-            }
+            if (!session.responses) return;
+
+            // Group this session's responses by area
+            const sessionResponsesByArea = new Map<string, ResponseData[]>();
+            session.responses.forEach((r) => {
+              // Find which area this question belongs to
+              const question = (questions || []).find(
+                (q: Question) => q.id === r.question_id
+              );
+              if (question) {
+                const areaResponses =
+                  sessionResponsesByArea.get(question.area_id) || [];
+                areaResponses.push(r);
+                sessionResponsesByArea.set(question.area_id, areaResponses);
+              }
+            });
+
+            // For each area in this session, if we haven't processed that area yet,
+            // use these responses (they're from the most recent session for this area)
+            sessionResponsesByArea.forEach((responses, areaId) => {
+              if (!processedAreaSessions.has(areaId)) {
+                processedAreaSessions.set(areaId, true);
+                const areaMap = areaResponseMaps.get(areaId) || new Map();
+                responses.forEach((r) => {
+                  areaMap.set(r.question_id, r);
+                });
+                areaResponseMaps.set(areaId, areaMap);
+              }
+            });
           });
 
-          // Create a map of question_id -> response (use latest if multiple)
-          const responseMap = new Map<string, ResponseData>();
-          allResponses.forEach((r) => {
-            responseMap.set(r.question_id, r);
-          });
-
-          // Process each area
+          // Process each area using SSOT per-area response maps
           const areasData: AreaComplianceData[] = (areas || []).map((area) => {
             // Get questions for this area
             const areaQuestions = (questions || []).filter(
               (q: Question) => q.area_id === area.id
             );
 
+            // Track if area has questions
+            const hasQuestions = areaQuestions.length > 0;
+
+            // Get the SSOT response map for this area (most recent session only)
+            const areaResponseMap = areaResponseMaps.get(area.id) || new Map();
+
             // Build hierarchical question tree with compliance
-            const questionTree = buildQuestionTree(areaQuestions, responseMap);
+            const questionTree = buildQuestionTree(
+              areaQuestions,
+              areaResponseMap
+            );
+
+            // Determine displayState:
+            // - 'no_questions': area has no questions
+            // - 'all_na': all root questions are N/A (-1)
+            // - 'normal': has valid compliance data
+            let displayState: "no_questions" | "all_na" | "normal" = "normal";
+            if (!hasQuestions) {
+              displayState = "no_questions";
+            } else if (questionTree.length > 0) {
+              const allRootNA = questionTree.every((q) => q.compliance === -1);
+              if (allRootNA) {
+                displayState = "all_na";
+              }
+            }
 
             // Calculate area compliance
-            const areaCompliance = calculateTreeCompliance(questionTree);
+            // If no questions, compliance is null (exclude from overall)
+            // If all N/A, compliance is null but displayState shows 'all_na'
+            const areaCompliance = hasQuestions
+              ? calculateTreeCompliance(questionTree)
+              : null;
 
             return {
               area,
               compliance: areaCompliance,
+              hasQuestions,
+              displayState,
               questions: questionTree,
             };
           });
 
-          // Calculate overall college compliance (average of all areas with data)
-          const areasWithData = areasData.filter((a) => a.compliance !== null);
+          // Calculate overall college compliance
+          // Exclude areas with NO questions (null compliance)
+          // But include areas with questions that have no responses (0%)
+          const areasWithQuestions = areasData.filter((a) => a.hasQuestions);
           const overallCompliance =
-            areasWithData.length > 0
-              ? areasWithData.reduce((sum, a) => sum + (a.compliance || 0), 0) /
-                areasWithData.length
-              : null;
+            areasWithQuestions.length > 0
+              ? areasWithQuestions.reduce(
+                  (sum, a) => sum + (a.compliance ?? 0),
+                  0
+                ) / areasWithQuestions.length
+              : null; // null if ALL areas have no questions
 
           return {
             college,
@@ -192,25 +261,33 @@ export default function Responses() {
       const isLeaf = children.length === 0;
 
       // Calculate compliance
-      let compliance: number | null = null;
+      let compliance: number;
       if (isLeaf) {
         // Leaf node: use direct response
         if (response) {
           if (response.status === "not_applicable") {
-            compliance = null; // Exclude N/A from calculations
+            // N/A: mark specially for exclusion from parent calculations
+            // We use -1 as a sentinel value to indicate N/A for filtering
+            compliance = -1; // Sentinel for N/A
           } else {
             compliance = response.status === "complied" ? 100 : 0;
           }
+        } else {
+          // No response = 0% (zero-baseline requirement)
+          compliance = 0;
         }
       } else {
-        // Parent node: average of children (excluding nulls)
-        const childCompliances = children
-          .map((c) => c.compliance)
-          .filter((c): c is number => c !== null);
-        if (childCompliances.length > 0) {
+        // Parent node: exclude N/A children from denominator
+        // Only average children that have actual compliance data
+        const validChildren = children.filter((c) => c.compliance !== -1);
+
+        if (validChildren.length > 0) {
           compliance =
-            childCompliances.reduce((sum, c) => sum + c, 0) /
-            childCompliances.length;
+            validChildren.reduce((sum, c) => sum + c.compliance, 0) /
+            validChildren.length;
+        } else {
+          // All children are N/A - parent becomes N/A too
+          compliance = -1;
         }
       }
 
@@ -233,14 +310,15 @@ export default function Responses() {
   };
 
   // Calculate overall compliance for a question tree
-  const calculateTreeCompliance = (
-    nodes: QuestionComplianceNode[]
-  ): number | null => {
-    const compliances = nodes
-      .map((n) => n.compliance)
-      .filter((c): c is number => c !== null);
-    if (compliances.length === 0) return null;
-    return compliances.reduce((sum, c) => sum + c, 0) / compliances.length;
+  // Excludes N/A (-1) from the calculation for consistency with parent logic
+  const calculateTreeCompliance = (nodes: QuestionComplianceNode[]): number => {
+    if (nodes.length === 0) return 0;
+    // Filter out N/A nodes (-1)
+    const validNodes = nodes.filter((n) => n.compliance !== -1);
+    if (validNodes.length === 0) return 0; // All N/A = 0% for area level
+    return (
+      validNodes.reduce((sum, n) => sum + n.compliance, 0) / validNodes.length
+    );
   };
 
   // Filter colleges by search term
@@ -369,6 +447,7 @@ export default function Responses() {
                       title={`Area ${areaData.area.area_number}: ${areaData.area.name}`}
                       subtitle={areaData.area.description || undefined}
                       compliance={areaData.compliance}
+                      displayState={areaData.displayState}
                       level="area"
                     >
                       {/* Question Tree */}
@@ -377,12 +456,13 @@ export default function Responses() {
                           No questions in this area
                         </p>
                       ) : (
-                        <div className="space-y-2">
-                          {areaData.questions.map((questionNode) => (
+                        <div className="space-y-1">
+                          {areaData.questions.map((questionNode, qIndex) => (
                             <QuestionComplianceTree
                               key={questionNode.id}
                               node={questionNode}
                               depth={0}
+                              index={qIndex}
                             />
                           ))}
                         </div>

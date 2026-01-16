@@ -13,12 +13,18 @@ import {
   Button,
   Card,
   Loading,
+  Modal,
   Textarea,
   showToast,
 } from "../../components/ui";
 
 interface QuestionResponse extends ResponseFormData {
   answered: boolean;
+}
+
+interface ExistingSessionInfo {
+  sessionId: string;
+  completedAt: string | null;
 }
 
 // Build hierarchical tree from flat question array
@@ -291,11 +297,16 @@ export default function CollegeEvaluate() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Single-submission model: track existing evaluation
+  const [existingSession, setExistingSession] =
+    useState<ExistingSessionInfo | null>(null);
+  const [showOverwriteModal, setShowOverwriteModal] = useState(false);
+
   useEffect(() => {
-    if (areaId) {
+    if (areaId && college) {
       fetchAreaAndQuestions();
     }
-  }, [areaId]);
+  }, [areaId, college]);
 
   const fetchAreaAndQuestions = async () => {
     try {
@@ -325,13 +336,67 @@ export default function CollegeEvaluate() {
       const leaves = getLeafQuestions(tree);
       setLeafQuestions(leaves);
 
+      // Check for existing evaluation session for this area
+      let existingResponses: Map<
+        string,
+        { status: ComplianceStatus; comment: string }
+      > = new Map();
+      if (college) {
+        const questionIds = leaves.map((q) => q.id);
+        const { data: existingSessions } = await supabase
+          .from("evaluation_sessions")
+          .select(
+            `
+            id,
+            completed_at,
+            responses!inner (
+              question_id,
+              status,
+              comment
+            )
+          `
+          )
+          .eq("college_id", college.id)
+          .eq("is_complete", true)
+          .in("responses.question_id", questionIds);
+
+        if (existingSessions && existingSessions.length > 0) {
+          // Find the session that has responses for this area
+          const sessionWithAreaResponses = existingSessions.find(
+            (session: any) =>
+              session.responses?.some((r: any) =>
+                questionIds.includes(r.question_id)
+              )
+          );
+
+          if (sessionWithAreaResponses) {
+            setExistingSession({
+              sessionId: sessionWithAreaResponses.id,
+              completedAt: sessionWithAreaResponses.completed_at,
+            });
+
+            // Pre-populate responses from existing data
+            (sessionWithAreaResponses as any).responses?.forEach((r: any) => {
+              if (questionIds.includes(r.question_id)) {
+                existingResponses.set(r.question_id, {
+                  status: r.status,
+                  comment: r.comment || "",
+                });
+              }
+            });
+          }
+        }
+      }
+
+      // Initialize responses (with existing data if available)
       const initialResponses = new Map<string, QuestionResponse>();
       leaves.forEach((q) => {
+        const existing = existingResponses.get(q.id);
         initialResponses.set(q.id, {
           question_id: q.id,
-          status: "not_applicable",
-          comment: "",
-          answered: false,
+          status: existing?.status || "not_applicable",
+          comment: existing?.comment || "",
+          answered: !!existing, // Mark as answered if we have existing data
         });
       });
       setResponses(initialResponses);
@@ -377,7 +442,8 @@ export default function CollegeEvaluate() {
     );
   };
 
-  const handleSubmit = async () => {
+  // Called when user clicks submit - checks for existing data first
+  const handleSubmitClick = () => {
     if (!college) {
       showToast("You must be logged in to submit an evaluation", "error");
       return;
@@ -392,8 +458,60 @@ export default function CollegeEvaluate() {
       return;
     }
 
+    // If there's an existing session, show overwrite warning
+    if (existingSession) {
+      setShowOverwriteModal(true);
+    } else {
+      handleSubmit();
+    }
+  };
+
+  // Perform the actual submission (with atomic overwrite if needed)
+  const handleSubmit = async () => {
+    if (!college) return;
+
+    setShowOverwriteModal(false);
     setIsSubmitting(true);
     try {
+      // ATOMIC OVERWRITE: Delete ALL previous responses for this area from this college
+      // This ensures single source of truth - no duplicate/stacking responses
+      const questionIds = leafQuestions.map((q) => q.id);
+
+      if (questionIds.length > 0) {
+        // Find all sessions for this college that have responses in this area
+        const { data: collegeSessions } = await supabase
+          .from("evaluation_sessions")
+          .select("id")
+          .eq("college_id", college.id);
+
+        if (collegeSessions && collegeSessions.length > 0) {
+          const sessionIds = collegeSessions.map((s) => s.id);
+
+          // Delete all responses for these questions from any of this college's sessions
+          await supabase
+            .from("responses")
+            .delete()
+            .in("session_id", sessionIds)
+            .in("question_id", questionIds);
+
+          // Clean up any now-empty sessions
+          for (const sessionId of sessionIds) {
+            const { count } = await supabase
+              .from("responses")
+              .select("id", { count: "exact", head: true })
+              .eq("session_id", sessionId);
+
+            if (count === 0) {
+              await supabase
+                .from("evaluation_sessions")
+                .delete()
+                .eq("id", sessionId);
+            }
+          }
+        }
+      }
+
+      // Create new session
       const sessionToken = uuidv4();
       const { data: sessionData, error: sessionError } = await supabase
         .from("evaluation_sessions")
@@ -427,7 +545,12 @@ export default function CollegeEvaluate() {
         .update({ is_complete: true, completed_at: new Date().toISOString() })
         .eq("id", sessionData.id);
 
-      showToast("Evaluation submitted successfully!", "success");
+      showToast(
+        existingSession
+          ? "Evaluation updated successfully!"
+          : "Evaluation submitted successfully!",
+        "success"
+      );
       navigate("/college");
     } catch (err) {
       console.error("Error submitting evaluation:", err);
@@ -596,16 +719,80 @@ export default function CollegeEvaluate() {
               </div>
               <Button
                 size="lg"
-                onClick={handleSubmit}
+                onClick={handleSubmitClick}
                 isLoading={isSubmitting}
                 disabled={getRequiredUnanswered().length > 0}
               >
-                Submit Evaluation
+                {existingSession ? "Update Evaluation" : "Submit Evaluation"}
               </Button>
             </div>
           </div>
         </div>
       )}
+
+      {/* Overwrite Warning Modal */}
+      <Modal
+        isOpen={showOverwriteModal}
+        onClose={() => setShowOverwriteModal(false)}
+        title="Update Existing Evaluation?"
+        size="md"
+      >
+        <div className="space-y-4">
+          <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+            <div className="flex items-start gap-3">
+              <svg
+                className="w-5 h-5 text-amber-600 shrink-0 mt-0.5"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
+                />
+              </svg>
+              <div>
+                <h4 className="font-semibold text-amber-800">
+                  Data Override Warning
+                </h4>
+                <p className="text-sm text-amber-700 mt-1">
+                  You have already submitted an evaluation for{" "}
+                  <strong>
+                    Area {area?.area_number}: {area?.name}
+                  </strong>
+                  .
+                </p>
+                <p className="text-sm text-amber-700 mt-2">
+                  Submitting now will <strong>permanently replace</strong> all
+                  previous responses for this area. This action cannot be
+                  undone.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {existingSession?.completedAt && (
+            <p className="text-sm text-gray-500">
+              Previous submission:{" "}
+              {new Date(existingSession.completedAt).toLocaleDateString()}
+            </p>
+          )}
+
+          <div className="flex justify-end gap-3 pt-2">
+            <Button
+              variant="secondary"
+              onClick={() => setShowOverwriteModal(false)}
+            >
+              Cancel
+            </Button>
+            <Button onClick={handleSubmit} isLoading={isSubmitting}>
+              Confirm & Update
+            </Button>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }

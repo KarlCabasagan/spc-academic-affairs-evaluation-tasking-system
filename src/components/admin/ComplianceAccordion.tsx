@@ -4,6 +4,7 @@ interface ComplianceAccordionProps {
   title: string;
   subtitle?: string;
   compliance: number | null;
+  displayState?: "no_questions" | "all_na" | "normal"; // Conditional display
   icon?: ReactNode;
   children: ReactNode;
   defaultExpanded?: boolean;
@@ -18,6 +19,7 @@ export default function ComplianceAccordion({
   title,
   subtitle,
   compliance,
+  displayState = "normal",
   icon,
   children,
   defaultExpanded = false,
@@ -118,28 +120,40 @@ export default function ComplianceAccordion({
 
         {/* Compliance Badge & Progress */}
         <div className="flex items-center gap-3 shrink-0">
-          {compliance !== null && compliance !== undefined && (
-            <>
-              {/* Progress bar (only for college and area levels) */}
-              {(level === "college" || level === "area") && (
-                <div className="w-24 h-2 bg-gray-200 rounded-full overflow-hidden hidden sm:block">
-                  <div
-                    className={`h-full ${color.bar} transition-all duration-300`}
-                    style={{ width: `${Math.min(compliance, 100)}%` }}
-                  />
-                </div>
-              )}
-              {/* Percentage */}
-              <span
-                className={`px-2 py-1 text-sm font-medium rounded-full ${color.bg} ${color.text}`}
-              >
-                {compliance.toFixed(1)}%
-              </span>
-            </>
-          )}
-          {compliance === null && (
+          {compliance !== null &&
+            compliance !== undefined &&
+            displayState === "normal" && (
+              <>
+                {/* Progress bar (only for college and area levels) */}
+                {(level === "college" || level === "area") && (
+                  <div className="w-24 h-2 bg-gray-200 rounded-full overflow-hidden hidden sm:block">
+                    <div
+                      className={`h-full ${color.bar} transition-all duration-300`}
+                      style={{ width: `${Math.min(compliance, 100)}%` }}
+                    />
+                  </div>
+                )}
+                {/* Percentage */}
+                <span
+                  className={`px-2 py-1 text-sm font-medium rounded-full ${color.bg} ${color.text}`}
+                >
+                  {compliance.toFixed(1)}%
+                </span>
+              </>
+            )}
+          {displayState === "all_na" && (
             <span className="px-2 py-1 text-sm font-medium rounded-full bg-gray-100 text-gray-500">
-              No data
+              Not Applicable
+            </span>
+          )}
+          {displayState === "no_questions" && (
+            <span className="px-2 py-1 text-sm font-medium rounded-full bg-gray-100 text-gray-400">
+              No Questions
+            </span>
+          )}
+          {compliance === null && displayState === "normal" && (
+            <span className="px-2 py-1 text-sm font-medium rounded-full bg-gray-100 text-gray-500">
+              No Data
             </span>
           )}
         </div>

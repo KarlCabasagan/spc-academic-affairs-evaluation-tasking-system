@@ -1,41 +1,35 @@
-import { Fragment, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { supabase } from "../../lib/supabase";
-import type { College, ComplianceStatus } from "../../lib/types";
+import type { Area, College, ComplianceStatus } from "../../lib/types";
 import * as XLSX from "xlsx";
 import { Button, Card, Loading, showToast } from "../../components/ui";
 
-interface QuestionWithArea {
+interface QuestionData {
   id: string;
-  question_text: string;
-  question_order: number;
-  areas: { name: string; area_number: number } | null;
+  area_id: string;
 }
 
-interface ResponseData {
-  question_id: string;
-  status: ComplianceStatus;
-  evaluation_sessions: {
-    college_id: string | null;
-  } | null;
+interface MatrixCell {
+  complied: number;
+  notComplied: number;
+  notApplicable: number;
+  compliance: number | null; // Percentage excluding N/A
+  total: number;
 }
 
-interface PivotRow {
-  questionId: string;
-  areaNumber: number;
-  areaName: string;
-  questionText: string;
-  collegeData: Record<
-    string,
-    { complied: number; not_complied: number; not_applicable: number }
-  >;
+interface MatrixRow {
+  area: Area;
+  collegeData: Record<string, MatrixCell>;
 }
 
 export default function Reports() {
+  const [areas, setAreas] = useState<Area[]>([]);
   const [colleges, setColleges] = useState<College[]>([]);
-  const [questions, setQuestions] = useState<QuestionWithArea[]>([]);
-  const [responses, setResponses] = useState<ResponseData[]>([]);
+  const [matrixData, setMatrixData] = useState<MatrixRow[]>([]);
+  const [collegeTotals, setCollegeTotals] = useState<
+    Record<string, MatrixCell>
+  >({});
   const [isLoading, setIsLoading] = useState(true);
-  const [pivotData, setPivotData] = useState<PivotRow[]>([]);
 
   useEffect(() => {
     fetchData();
@@ -43,67 +37,59 @@ export default function Reports() {
 
   const fetchData = async () => {
     try {
+      // Fetch areas
+      const { data: areasData, error: areasError } = await supabase
+        .from("areas")
+        .select("*")
+        .eq("is_active", true)
+        .order("area_number", { ascending: true });
+
+      if (areasError) throw areasError;
+      setAreas(areasData || []);
+
       // Fetch colleges
       const { data: collegesData, error: collegesError } = await supabase
         .from("colleges")
         .select("*")
         .eq("is_active", true)
-        .order("name", { ascending: true });
+        .order("code", { ascending: true });
 
       if (collegesError) throw collegesError;
       setColleges(collegesData || []);
 
-      // Fetch questions with areas
+      // Fetch all questions (to map responses to areas)
       const { data: questionsData, error: questionsError } = await supabase
         .from("questions")
-        .select(
-          `
-          id,
-          question_text,
-          question_order,
-          parent_id,
-          areas (name, area_number)
-        `
-        )
-        .order("question_order", { ascending: true });
+        .select("id, area_id")
+        .eq("is_active", true);
 
       if (questionsError) throw questionsError;
 
-      // Filter for leaf nodes (questions that are NOT parents)
-      // 1. Get all parent IDs
-      const allQuestions =
-        (questionsData as unknown as (QuestionWithArea & {
-          parent_id: string | null;
-        })[]) || [];
+      // Fetch all completed sessions with responses and completed_at for SSOT
+      const { data: sessionsData, error: sessionsError } = await supabase
+        .from("evaluation_sessions")
+        .select(
+          `
+          id,
+          college_id,
+          completed_at,
+          responses (
+            question_id,
+            status
+          )
+        `
+        )
+        .eq("is_complete", true)
+        .order("completed_at", { ascending: false }); // Most recent first
 
-      // 2. Also check which questions are referred to as parents by others
-      const actualParentIds = new Set(
-        allQuestions.map((q) => q.parent_id).filter((id) => id !== null)
-      );
+      if (sessionsError) throw sessionsError;
 
-      // 3. Filter: Keep if ID is NOT in actualParentIds
-      const leafQuestions = allQuestions.filter(
-        (q) => !actualParentIds.has(q.id)
-      );
-
-      setQuestions(leafQuestions);
-
-      // Fetch all responses with session info
-      const { data: responsesData, error: responsesError } =
-        await supabase.from("responses").select(`
-          question_id,
-          status,
-          evaluation_sessions (college_id)
-        `);
-
-      if (responsesError) throw responsesError;
-      setResponses((responsesData as unknown as ResponseData[]) || []);
-
-      // Build pivot data
-      buildPivotData(
+      // Build matrix with SSOT
+      buildMatrixWithSSOT(
+        areasData || [],
         collegesData || [],
-        (questionsData as unknown as QuestionWithArea[]) || [],
-        (responsesData as unknown as ResponseData[]) || []
+        questionsData || [],
+        sessionsData || []
       );
     } catch (error) {
       console.error("Error fetching data:", error);
@@ -113,154 +99,205 @@ export default function Reports() {
     }
   };
 
-  const buildPivotData = (
-    collegesData: College[],
-    questionsData: QuestionWithArea[],
-    responsesData: ResponseData[]
-  ) => {
-    const pivot: PivotRow[] = questionsData.map((question) => {
-      const collegeData: Record<
-        string,
-        { complied: number; not_complied: number; not_applicable: number }
-      > = {};
+  interface SessionWithResponses {
+    id: string;
+    college_id: string | null;
+    completed_at: string | null;
+    responses: { question_id: string; status: ComplianceStatus }[] | null;
+  }
 
-      // Initialize for each college
+  const buildMatrixWithSSOT = (
+    areasData: Area[],
+    collegesData: College[],
+    questionsData: QuestionData[],
+    sessionsData: SessionWithResponses[]
+  ) => {
+    // Create question -> area mapping
+    const questionAreaMap = new Map<string, string>();
+    questionsData.forEach((q) => {
+      questionAreaMap.set(q.id, q.area_id);
+    });
+
+    // Initialize matrix
+    const matrix: MatrixRow[] = areasData.map((area) => {
+      const collegeData: Record<string, MatrixCell> = {};
       collegesData.forEach((college) => {
         collegeData[college.id] = {
           complied: 0,
-          not_complied: 0,
-          not_applicable: 0,
+          notComplied: 0,
+          notApplicable: 0,
+          compliance: null,
+          total: 0,
         };
       });
+      return { area, collegeData };
+    });
 
-      // Count responses per college for this question
-      responsesData
-        .filter((r) => r.question_id === question.id)
-        .forEach((response) => {
-          const collegeId = response.evaluation_sessions?.college_id;
-          if (collegeId && collegeData[collegeId]) {
-            collegeData[collegeId][response.status]++;
-          }
-        });
+    // SSOT: For each college + area pair, track which we've already processed
+    // Sessions are ordered most-recent-first, so first seen = most recent
+    const processedCollegeAreas = new Map<string, Set<string>>(); // college_id -> Set<area_id>
 
-      return {
-        questionId: question.id,
-        areaNumber: question.areas?.area_number || 0,
-        areaName: question.areas?.name || "Unknown",
-        questionText: question.question_text,
-        collegeData,
+    sessionsData.forEach((session) => {
+      if (!session.college_id || !session.responses) return;
+
+      // Get or create the processed areas set for this college
+      let processedAreas = processedCollegeAreas.get(session.college_id);
+      if (!processedAreas) {
+        processedAreas = new Set();
+        processedCollegeAreas.set(session.college_id, processedAreas);
+      }
+
+      // Group this session's responses by area
+      const responsesByArea = new Map<
+        string,
+        { question_id: string; status: ComplianceStatus }[]
+      >();
+      session.responses.forEach((r) => {
+        const areaId = questionAreaMap.get(r.question_id);
+        if (areaId) {
+          const existing = responsesByArea.get(areaId) || [];
+          existing.push(r);
+          responsesByArea.set(areaId, existing);
+        }
+      });
+
+      // For each area in this session, if not yet processed for this college, use these responses
+      responsesByArea.forEach((responses, areaId) => {
+        if (!processedAreas!.has(areaId)) {
+          processedAreas!.add(areaId);
+
+          // Find matrix row for this area
+          const matrixRow = matrix.find((r) => r.area.id === areaId);
+          if (!matrixRow || !matrixRow.collegeData[session.college_id!]) return;
+
+          const cell = matrixRow.collegeData[session.college_id!];
+
+          // Count responses
+          responses.forEach((r) => {
+            cell.total++;
+            switch (r.status) {
+              case "complied":
+                cell.complied++;
+                break;
+              case "not_complied":
+                cell.notComplied++;
+                break;
+              case "not_applicable":
+                cell.notApplicable++;
+                break;
+            }
+          });
+        }
+      });
+    });
+
+    // Calculate compliance percentages (excluding N/A from denominator)
+    matrix.forEach((row) => {
+      Object.values(row.collegeData).forEach((cell) => {
+        const denominator = cell.complied + cell.notComplied;
+        cell.compliance =
+          denominator > 0 ? (cell.complied / denominator) * 100 : null;
+      });
+    });
+
+    // Calculate college totals
+    const totals: Record<string, MatrixCell> = {};
+    collegesData.forEach((college) => {
+      let totalComplied = 0;
+      let totalNotComplied = 0;
+      let totalNotApplicable = 0;
+      let totalResponses = 0;
+
+      matrix.forEach((row) => {
+        const cell = row.collegeData[college.id];
+        if (cell) {
+          totalComplied += cell.complied;
+          totalNotComplied += cell.notComplied;
+          totalNotApplicable += cell.notApplicable;
+          totalResponses += cell.total;
+        }
+      });
+
+      const denominator = totalComplied + totalNotComplied;
+      totals[college.id] = {
+        complied: totalComplied,
+        notComplied: totalNotComplied,
+        notApplicable: totalNotApplicable,
+        compliance:
+          denominator > 0 ? (totalComplied / denominator) * 100 : null,
+        total: totalResponses,
       };
     });
 
-    // Sort by area number then question order
-    pivot.sort((a, b) => a.areaNumber - b.areaNumber);
-    setPivotData(pivot);
+    setMatrixData(matrix);
+    setCollegeTotals(totals);
+  };
+
+  const getComplianceColor = (compliance: number | null): string => {
+    if (compliance === null) return "text-gray-400";
+    if (compliance >= 80) return "text-emerald-600";
+    if (compliance >= 50) return "text-amber-600";
+    return "text-red-600";
+  };
+
+  const getComplianceBg = (compliance: number | null): string => {
+    if (compliance === null) return "bg-gray-50";
+    if (compliance >= 80) return "bg-emerald-50";
+    if (compliance >= 50) return "bg-amber-50";
+    return "bg-red-50";
   };
 
   const exportToExcel = () => {
-    if (pivotData.length === 0) {
+    if (matrixData.length === 0) {
       showToast("No data to export", "error");
       return;
     }
 
     // Build header row
-    const headers = ["Area", "Question"];
-    colleges.forEach((college) => {
-      headers.push(`${college.name} - Complied`);
-      headers.push(`${college.name} - Not Complied`);
-      headers.push(`${college.name} - N/A`);
-    });
+    const headers = ["Area", ...colleges.map((c) => c.code || c.name)];
 
     // Build data rows
-    const rows = pivotData.map((row) => {
+    const rows = matrixData.map((row) => {
       const dataRow: (string | number)[] = [
-        `Area ${row.areaNumber}: ${row.areaName}`,
-        row.questionText,
+        `Area ${row.area.area_number}: ${row.area.name}`,
       ];
-
       colleges.forEach((college) => {
-        const data = row.collegeData[college.id] || {
-          complied: 0,
-          not_complied: 0,
-          not_applicable: 0,
-        };
-        dataRow.push(data.complied);
-        dataRow.push(data.not_complied);
-        dataRow.push(data.not_applicable);
+        const cell = row.collegeData[college.id];
+        dataRow.push(
+          cell?.compliance !== null ? `${cell.compliance.toFixed(1)}%` : "N/A"
+        );
       });
-
       return dataRow;
     });
+
+    // Add totals row
+    const totalsRow: (string | number)[] = ["Total Compliance"];
+    colleges.forEach((college) => {
+      const total = collegeTotals[college.id];
+      totalsRow.push(
+        total?.compliance !== null ? `${total.compliance.toFixed(1)}%` : "N/A"
+      );
+    });
+    rows.push(totalsRow);
 
     // Create workbook
     const wb = XLSX.utils.book_new();
     const ws = XLSX.utils.aoa_to_sheet([headers, ...rows]);
 
-    // Set column widths
-    ws["!cols"] = [
-      { wch: 30 }, // Area
-      { wch: 60 }, // Question
-      ...colleges.flatMap(() => [{ wch: 15 }, { wch: 15 }, { wch: 15 }]),
-    ];
+    ws["!cols"] = [{ wch: 40 }, ...colleges.map(() => ({ wch: 15 }))];
 
-    XLSX.utils.book_append_sheet(wb, ws, "Evaluation Report");
+    XLSX.utils.book_append_sheet(wb, ws, "Compliance Matrix");
     XLSX.writeFile(
       wb,
-      `evaluation_report_${new Date().toISOString().split("T")[0]}.xlsx`
+      `compliance_matrix_${new Date().toISOString().split("T")[0]}.xlsx`
     );
-    showToast("Report exported successfully", "success");
-  };
-
-  const exportToCSV = () => {
-    if (pivotData.length === 0) {
-      showToast("No data to export", "error");
-      return;
-    }
-
-    // Build header row
-    const headers = ["Area", "Question"];
-    colleges.forEach((college) => {
-      headers.push(`${college.name} - Complied`);
-      headers.push(`${college.name} - Not Complied`);
-      headers.push(`${college.name} - N/A`);
-    });
-
-    // Build data rows
-    const rows = pivotData.map((row) => {
-      const dataRow: (string | number)[] = [
-        `Area ${row.areaNumber}: ${row.areaName}`,
-        row.questionText,
-      ];
-
-      colleges.forEach((college) => {
-        const data = row.collegeData[college.id] || {
-          complied: 0,
-          not_complied: 0,
-          not_applicable: 0,
-        };
-        dataRow.push(data.complied);
-        dataRow.push(data.not_complied);
-        dataRow.push(data.not_applicable);
-      });
-
-      return dataRow;
-    });
-
-    // Create workbook and export as CSV
-    const wb = XLSX.utils.book_new();
-    const ws = XLSX.utils.aoa_to_sheet([headers, ...rows]);
-    XLSX.utils.book_append_sheet(wb, ws, "Report");
-    XLSX.writeFile(
-      wb,
-      `evaluation_report_${new Date().toISOString().split("T")[0]}.csv`
-    );
-    showToast("CSV exported successfully", "success");
+    showToast("Matrix exported successfully", "success");
   };
 
   if (isLoading) {
     return (
       <div className="flex items-center justify-center py-16">
-        <Loading size="lg" text="Loading report data..." />
+        <Loading size="lg" text="Loading compliance matrix..." />
       </div>
     );
   }
@@ -271,56 +308,36 @@ export default function Reports() {
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-8">
         <div>
           <h1 className="text-2xl sm:text-3xl font-bold text-gray-900">
-            Reports
+            Compliance Matrix
           </h1>
           <p className="text-gray-600 mt-1">
-            Export evaluation data by question and college
+            Cross-tabular view of PACUCOA Areas vs Colleges
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <Button variant="secondary" onClick={exportToCSV}>
-            <svg
-              className="w-4 h-4"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
-              />
-            </svg>
-            Export CSV
-          </Button>
-          <Button onClick={exportToExcel}>
-            <svg
-              className="w-4 h-4"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
-              />
-            </svg>
-            Export Excel
-          </Button>
-        </div>
+        <Button onClick={exportToExcel}>
+          <svg
+            className="w-4 h-4"
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={2}
+              d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+            />
+          </svg>
+          Export Excel
+        </Button>
       </div>
 
       {/* Stats */}
       <div className="grid gap-4 sm:grid-cols-3 mb-8">
         <Card>
           <div className="text-center">
-            <p className="text-3xl font-bold text-maroon-800">
-              {questions.length}
-            </p>
-            <p className="text-sm text-gray-500">Questions</p>
+            <p className="text-3xl font-bold text-maroon-800">{areas.length}</p>
+            <p className="text-sm text-gray-500">PACUCOA Areas</p>
           </div>
         </Card>
         <Card>
@@ -328,21 +345,68 @@ export default function Reports() {
             <p className="text-3xl font-bold text-maroon-800">
               {colleges.length}
             </p>
-            <p className="text-sm text-gray-500">Colleges</p>
+            <p className="text-sm text-gray-500">Active Colleges</p>
           </div>
         </Card>
         <Card>
           <div className="text-center">
             <p className="text-3xl font-bold text-maroon-800">
-              {responses.length}
+              {Object.values(collegeTotals).reduce(
+                (sum, t) => sum + t.total,
+                0
+              )}
             </p>
             <p className="text-sm text-gray-500">Total Responses</p>
           </div>
         </Card>
       </div>
 
-      {/* Preview Table */}
-      {pivotData.length === 0 ? (
+      {/* Legend */}
+      <div className="flex flex-wrap gap-4 mb-6 text-sm">
+        <div className="flex items-center gap-2">
+          <span className="w-3 h-3 rounded-full bg-emerald-500" />
+          <span className="text-gray-600">≥80% Compliant</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="w-3 h-3 rounded-full bg-amber-500" />
+          <span className="text-gray-600">50-79% Compliant</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="w-3 h-3 rounded-full bg-red-500" />
+          <span className="text-gray-600">&lt;50% Compliant</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="w-3 h-3 rounded-full bg-gray-300" />
+          <span className="text-gray-600">No Data</span>
+        </div>
+      </div>
+
+      {/* N/A Exclusion Note */}
+      <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-6">
+        <div className="flex items-start gap-2">
+          <svg
+            className="w-4 h-4 text-blue-600 shrink-0 mt-0.5"
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={2}
+              d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+            />
+          </svg>
+          <p className="text-sm text-blue-800">
+            <strong>Scoring Logic:</strong> Compliance percentages exclude "Not
+            Applicable" (N/A) responses from the denominator. Only "Complied"
+            and "Not Complied" statuses contribute to the final percentage.
+          </p>
+        </div>
+      </div>
+
+      {/* Matrix Table */}
+      {colleges.length === 0 || areas.length === 0 ? (
         <Card className="text-center py-12">
           <svg
             className="w-16 h-16 text-gray-300 mx-auto mb-4"
@@ -361,88 +425,102 @@ export default function Reports() {
             No data available
           </h3>
           <p className="text-gray-500">
-            Add questions and collect evaluations to see report data
+            Add areas and colleges to see the compliance matrix
           </p>
         </Card>
       ) : (
         <Card className="overflow-hidden">
           <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-200">
-              <thead className="bg-gray-50">
-                <tr>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider sticky left-0 bg-gray-50 z-10">
-                    Question
+            <table className="min-w-full">
+              {/* Header */}
+              <thead>
+                <tr className="bg-gray-50 border-b border-gray-200">
+                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider sticky left-0 bg-gray-50 z-10 min-w-[200px]">
+                    PACUCOA Area
                   </th>
                   {colleges.map((college) => (
                     <th
                       key={college.id}
-                      colSpan={3}
-                      className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider border-l border-gray-200"
+                      className="px-4 py-3 text-center text-xs font-semibold text-gray-600 uppercase tracking-wider min-w-[100px]"
+                      title={college.name}
                     >
-                      {college.name}
+                      {college.code || college.name}
                     </th>
                   ))}
                 </tr>
-                <tr>
-                  <th className="px-4 py-2 text-left text-xs text-gray-400 sticky left-0 bg-gray-50 z-10"></th>
-                  {colleges.map((college) => (
-                    <Fragment key={`header-${college.id}`}>
-                      <th className="px-2 py-2 text-center text-xs text-green-600 font-medium border-l border-gray-200">
-                        ✓
-                      </th>
-                      <th className="px-2 py-2 text-center text-xs text-red-600 font-medium">
-                        ✗
-                      </th>
-                      <th className="px-2 py-2 text-center text-xs text-gray-400 font-medium">
-                        N/A
-                      </th>
-                    </Fragment>
-                  ))}
-                </tr>
               </thead>
-              <tbody className="bg-white divide-y divide-gray-200">
-                {pivotData.slice(0, 10).map((row, index) => (
+
+              {/* Body */}
+              <tbody className="divide-y divide-gray-100">
+                {matrixData.map((row, index) => (
                   <tr
-                    key={row.questionId}
-                    className={index % 2 === 0 ? "bg-white" : "bg-gray-50"}
+                    key={row.area.id}
+                    className={index % 2 === 0 ? "bg-white" : "bg-gray-50/50"}
                   >
-                    <td className="px-4 py-3 text-sm text-gray-900 sticky left-0 bg-inherit z-10 max-w-xs">
-                      <span className="text-xs text-gray-400 block">
-                        Area {row.areaNumber}
-                      </span>
-                      <span className="line-clamp-2">{row.questionText}</span>
+                    <td className="px-4 py-3 text-sm sticky left-0 z-10 bg-inherit">
+                      <span className="font-semibold text-gray-900">
+                        Area {row.area.area_number}:
+                      </span>{" "}
+                      <span className="text-gray-700">{row.area.name}</span>
                     </td>
                     {colleges.map((college) => {
-                      const data = row.collegeData[college.id] || {
-                        complied: 0,
-                        not_complied: 0,
-                        not_applicable: 0,
-                      };
+                      const cell = row.collegeData[college.id];
                       return (
-                        <Fragment key={`data-${college.id}`}>
-                          <td className="px-2 py-3 text-center text-sm text-green-600 border-l border-gray-100">
-                            {data.complied}
-                          </td>
-                          <td className="px-2 py-3 text-center text-sm text-red-600">
-                            {data.not_complied}
-                          </td>
-                          <td className="px-2 py-3 text-center text-sm text-gray-400">
-                            {data.not_applicable}
-                          </td>
-                        </Fragment>
+                        <td
+                          key={college.id}
+                          className={`px-4 py-3 text-center text-sm font-medium ${getComplianceBg(
+                            cell?.compliance
+                          )}`}
+                          title={`Complied: ${
+                            cell?.complied || 0
+                          }, Not Complied: ${cell?.notComplied || 0}, N/A: ${
+                            cell?.notApplicable || 0
+                          }`}
+                        >
+                          <span
+                            className={getComplianceColor(cell?.compliance)}
+                          >
+                            {cell?.compliance !== null
+                              ? `${cell.compliance.toFixed(1)}%`
+                              : "—"}
+                          </span>
+                        </td>
                       );
                     })}
                   </tr>
                 ))}
               </tbody>
+
+              {/* Footer - Totals */}
+              <tfoot>
+                <tr className="bg-maroon-50 border-t-2 border-maroon-200">
+                  <td className="px-4 py-3 text-sm font-bold text-maroon-900 sticky left-0 bg-maroon-50 z-10">
+                    Total Compliance
+                  </td>
+                  {colleges.map((college) => {
+                    const total = collegeTotals[college.id];
+                    return (
+                      <td
+                        key={college.id}
+                        className="px-4 py-3 text-center text-sm font-bold"
+                        title={`Complied: ${
+                          total?.complied || 0
+                        }, Not Complied: ${total?.notComplied || 0}, N/A: ${
+                          total?.notApplicable || 0
+                        }`}
+                      >
+                        <span className={getComplianceColor(total?.compliance)}>
+                          {total?.compliance !== null
+                            ? `${total.compliance.toFixed(1)}%`
+                            : "—"}
+                        </span>
+                      </td>
+                    );
+                  })}
+                </tr>
+              </tfoot>
             </table>
           </div>
-          {pivotData.length > 10 && (
-            <div className="px-4 py-3 bg-gray-50 border-t border-gray-200 text-center text-sm text-gray-500">
-              Showing 10 of {pivotData.length} questions. Export to see all
-              data.
-            </div>
-          )}
         </Card>
       )}
     </div>
