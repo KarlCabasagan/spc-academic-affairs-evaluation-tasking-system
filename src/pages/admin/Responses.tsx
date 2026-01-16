@@ -1,12 +1,20 @@
 import { useEffect, useState } from "react";
 import { supabase } from "../../lib/supabase";
+import { useAuth } from "../../context/AuthContext";
 import type {
   College,
   Area,
   Question,
   ComplianceStatus,
 } from "../../lib/types";
-import { Card, Input, Loading, showToast } from "../../components/ui";
+import {
+  Button,
+  Card,
+  Input,
+  Loading,
+  Modal,
+  showToast,
+} from "../../components/ui";
 import ComplianceAccordion from "../../components/admin/ComplianceAccordion";
 import QuestionComplianceTree from "../../components/admin/QuestionComplianceTree";
 import type { QuestionComplianceNode } from "../../components/admin/QuestionComplianceTree";
@@ -40,13 +48,72 @@ interface CollegeComplianceData {
 }
 
 export default function Responses() {
+  const { user } = useAuth();
   const [collegesData, setCollegesData] = useState<CollegeComplianceData[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState("");
 
+  // Reset data modal state
+  const [showResetModal, setShowResetModal] = useState(false);
+  const [resetPassword, setResetPassword] = useState("");
+  const [isResetting, setIsResetting] = useState(false);
+
   useEffect(() => {
     fetchComplianceData();
   }, []);
+
+  // Handle data reset with password verification
+  const handleResetData = async () => {
+    if (!user?.email) {
+      showToast("User not authenticated", "error");
+      return;
+    }
+
+    if (!resetPassword.trim()) {
+      showToast("Please enter your password", "error");
+      return;
+    }
+
+    setIsResetting(true);
+    try {
+      // Verify admin password using sign in
+      const { error: authError } = await supabase.auth.signInWithPassword({
+        email: user.email,
+        password: resetPassword,
+      });
+
+      if (authError) {
+        showToast("Invalid password. Please try again.", "error");
+        return;
+      }
+
+      // Delete all responses first (foreign key constraint)
+      const { error: responsesError } = await supabase
+        .from("responses")
+        .delete()
+        .neq("id", "00000000-0000-0000-0000-000000000000"); // Delete all
+
+      if (responsesError) throw responsesError;
+
+      // Delete all evaluation sessions
+      const { error: sessionsError } = await supabase
+        .from("evaluation_sessions")
+        .delete()
+        .neq("id", "00000000-0000-0000-0000-000000000000"); // Delete all
+
+      if (sessionsError) throw sessionsError;
+
+      showToast("All evaluation data has been reset", "success");
+      setShowResetModal(false);
+      setResetPassword("");
+      fetchComplianceData(); // Refresh data
+    } catch (error) {
+      console.error("Error resetting data:", error);
+      showToast("Failed to reset data. Please try again.", "error");
+    } finally {
+      setIsResetting(false);
+    }
+  };
 
   const fetchComplianceData = async () => {
     try {
@@ -201,16 +268,18 @@ export default function Responses() {
           });
 
           // Calculate overall college compliance
-          // Exclude areas with NO questions (null compliance)
-          // But include areas with questions that have no responses (0%)
-          const areasWithQuestions = areasData.filter((a) => a.hasQuestions);
+          // Exclude: areas with NO questions AND areas where ALL questions are N/A
+          // This ensures N/A areas don't penalize the overall percentage
+          const areasWithValidCompliance = areasData.filter(
+            (a) => a.hasQuestions && a.displayState !== "all_na"
+          );
           const overallCompliance =
-            areasWithQuestions.length > 0
-              ? areasWithQuestions.reduce(
+            areasWithValidCompliance.length > 0
+              ? areasWithValidCompliance.reduce(
                   (sum, a) => sum + (a.compliance ?? 0),
                   0
-                ) / areasWithQuestions.length
-              : null; // null if ALL areas have no questions
+                ) / areasWithValidCompliance.length
+              : null; // null if ALL areas have no questions or are all N/A
 
           return {
             college,
@@ -348,7 +417,7 @@ export default function Responses() {
         </p>
       </div>
 
-      {/* Search */}
+      {/* Search & Actions */}
       <Card className="mb-6">
         <div className="flex flex-col sm:flex-row gap-4 items-start sm:items-end">
           <div className="flex-1 w-full">
@@ -359,6 +428,13 @@ export default function Responses() {
               onChange={(e) => setSearchTerm(e.target.value)}
             />
           </div>
+          <Button
+            variant="danger"
+            onClick={() => setShowResetModal(true)}
+            className="shrink-0"
+          >
+            Reset All Data
+          </Button>
           <div className="text-sm text-gray-500">
             Showing {filteredColleges.length} of {collegesData.length} colleges
           </div>
@@ -475,6 +551,83 @@ export default function Responses() {
           ))}
         </div>
       )}
+
+      {/* Reset Data Confirmation Modal */}
+      <Modal
+        isOpen={showResetModal}
+        onClose={() => {
+          setShowResetModal(false);
+          setResetPassword("");
+        }}
+        title="Reset All Evaluation Data?"
+        size="md"
+      >
+        <div className="space-y-4">
+          <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+            <div className="flex items-start gap-3">
+              <svg
+                className="w-5 h-5 text-red-600 shrink-0 mt-0.5"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
+                />
+              </svg>
+              <div>
+                <h4 className="font-semibold text-red-800">Danger Zone</h4>
+                <p className="text-sm text-red-700 mt-1">
+                  This will <strong>permanently delete</strong>:
+                </p>
+                <ul className="text-sm text-red-700 mt-2 list-disc list-inside">
+                  <li>All evaluation sessions</li>
+                  <li>All responses from all colleges</li>
+                </ul>
+                <p className="text-sm text-red-700 mt-2 font-medium">
+                  This action CANNOT be undone.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Enter your password to confirm
+            </label>
+            <input
+              type="password"
+              value={resetPassword}
+              onChange={(e) => setResetPassword(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-red-500"
+              placeholder="Your admin password"
+            />
+          </div>
+
+          <div className="flex justify-end gap-3 pt-2">
+            <Button
+              variant="secondary"
+              onClick={() => {
+                setShowResetModal(false);
+                setResetPassword("");
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              onClick={handleResetData}
+              isLoading={isResetting}
+              disabled={!resetPassword.trim()}
+            >
+              Reset All Data
+            </Button>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }
