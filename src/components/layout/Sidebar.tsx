@@ -1,6 +1,8 @@
+import { useState } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "../../context/AuthContext";
-import { Button } from "../ui";
+import { supabase } from "../../lib/supabase";
+import { Button, Modal, showToast } from "../ui";
 
 interface SidebarProps {
   isOpen: boolean;
@@ -11,9 +13,88 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
   const { user, signOut } = useAuth();
   const navigate = useNavigate();
 
+  // Change password modal state
+  const [showPasswordModal, setShowPasswordModal] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmNewPassword, setConfirmNewPassword] = useState("");
+  const [isChangingPassword, setIsChangingPassword] = useState(false);
+  const [passwordError, setPasswordError] = useState("");
+
   const handleSignOut = async () => {
     await signOut();
     navigate("/admin/login");
+  };
+
+  const handleChangePassword = async () => {
+    setPasswordError("");
+
+    // Validation
+    if (!currentPassword.trim()) {
+      setPasswordError("Please enter your current password");
+      return;
+    }
+
+    if (!newPassword.trim()) {
+      setPasswordError("Please enter a new password");
+      return;
+    }
+
+    if (newPassword.length < 6) {
+      setPasswordError("New password must be at least 6 characters");
+      return;
+    }
+
+    if (newPassword !== confirmNewPassword) {
+      setPasswordError("New passwords do not match");
+      return;
+    }
+
+    if (currentPassword === newPassword) {
+      setPasswordError("New password must be different from current password");
+      return;
+    }
+
+    setIsChangingPassword(true);
+
+    try {
+      // First verify the current password by attempting to sign in
+      const { error: authError } = await supabase.auth.signInWithPassword({
+        email: user?.email || "",
+        password: currentPassword,
+      });
+
+      if (authError) {
+        setPasswordError("Current password is incorrect");
+        return;
+      }
+
+      // Now update the password
+      const { error: updateError } = await supabase.auth.updateUser({
+        password: newPassword,
+      });
+
+      if (updateError) {
+        setPasswordError(updateError.message || "Failed to update password");
+        return;
+      }
+
+      showToast("Password changed successfully", "success");
+      setShowPasswordModal(false);
+      resetPasswordForm();
+    } catch (error) {
+      console.error("Error changing password:", error);
+      setPasswordError("An unexpected error occurred. Please try again.");
+    } finally {
+      setIsChangingPassword(false);
+    }
+  };
+
+  const resetPasswordForm = () => {
+    setCurrentPassword("");
+    setNewPassword("");
+    setConfirmNewPassword("");
+    setPasswordError("");
   };
 
   const navItems = [
@@ -162,21 +243,11 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
           {/* Header */}
           <div className="px-6 py-5 border-b border-gray-100">
             <div className="flex items-center gap-3">
-              <div className="w-10 h-10 bg-maroon-800 rounded-lg flex items-center justify-center">
-                <svg
-                  className="w-5 h-5 text-white"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
-                  />
-                </svg>
-              </div>
+              <img
+                src="/spc-logo.png"
+                alt="SPC Logo"
+                className="w-10 h-10 object-contain"
+              />
               <div>
                 <h2 className="font-semibold text-gray-900">Admin Panel</h2>
                 <p className="text-xs text-gray-500">PACUCOA Evaluation</p>
@@ -219,6 +290,30 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
                 <p className="text-xs text-gray-500">Administrator</p>
               </div>
             </div>
+
+            {/* Change Password Button */}
+            <Button
+              variant="ghost"
+              className="w-full justify-start mb-1"
+              onClick={() => setShowPasswordModal(true)}
+            >
+              <svg
+                className="w-5 h-5"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"
+                />
+              </svg>
+              Change Password
+            </Button>
+
+            {/* Sign Out Button */}
             <Button
               variant="ghost"
               className="w-full justify-start"
@@ -242,6 +337,102 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
           </div>
         </div>
       </aside>
+
+      {/* Change Password Modal */}
+      <Modal
+        isOpen={showPasswordModal}
+        onClose={() => {
+          setShowPasswordModal(false);
+          resetPasswordForm();
+        }}
+        title="Change Password"
+        size="md"
+      >
+        <div className="space-y-4">
+          {/* Error Message */}
+          {passwordError && (
+            <div className="bg-red-50 border border-red-200 rounded-lg p-3 flex items-start gap-2">
+              <svg
+                className="w-5 h-5 text-red-500 shrink-0 mt-0.5"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                />
+              </svg>
+              <p className="text-sm text-red-700">{passwordError}</p>
+            </div>
+          )}
+
+          {/* Current Password */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Current Password
+            </label>
+            <input
+              type="password"
+              value={currentPassword}
+              onChange={(e) => setCurrentPassword(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-maroon-500 focus:border-maroon-500"
+              placeholder="Enter current password"
+            />
+          </div>
+
+          {/* New Password */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              New Password
+            </label>
+            <input
+              type="password"
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-maroon-500 focus:border-maroon-500"
+              placeholder="Enter new password"
+            />
+            <p className="mt-1 text-xs text-gray-500">At least 6 characters</p>
+          </div>
+
+          {/* Confirm New Password */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Confirm New Password
+            </label>
+            <input
+              type="password"
+              value={confirmNewPassword}
+              onChange={(e) => setConfirmNewPassword(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-maroon-500 focus:border-maroon-500"
+              placeholder="Confirm new password"
+            />
+          </div>
+
+          {/* Actions */}
+          <div className="flex justify-end gap-3 pt-2">
+            <Button
+              variant="secondary"
+              onClick={() => {
+                setShowPasswordModal(false);
+                resetPasswordForm();
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={handleChangePassword}
+              isLoading={isChangingPassword}
+              disabled={!currentPassword || !newPassword || !confirmNewPassword}
+            >
+              Change Password
+            </Button>
+          </div>
+        </div>
+      </Modal>
     </>
   );
 }

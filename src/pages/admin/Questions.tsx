@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import { useParams, Link } from "react-router-dom";
 import { supabase } from "../../lib/supabase";
+import { useAuth } from "../../context/AuthContext";
 import type { Area, Question, QuestionFormData } from "../../lib/types";
 import {
   Button,
@@ -12,6 +13,12 @@ import {
   Loading,
   showToast,
 } from "../../components/ui";
+
+interface CollegeWithResponses {
+  id: string;
+  name: string;
+  code: string | null;
+}
 
 // Build hierarchical tree from flat question array
 function buildQuestionTree(questions: Question[]): Question[] {
@@ -327,6 +334,7 @@ function QuestionItem({
 
 export default function Questions() {
   const { areaId } = useParams<{ areaId: string }>();
+  const { user } = useAuth();
 
   const [area, setArea] = useState<Area | null>(null);
   const [questions, setQuestions] = useState<Question[]>([]);
@@ -338,6 +346,17 @@ export default function Questions() {
     null
   );
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Clear all questions modal state
+  const [showClearAllModal, setShowClearAllModal] = useState(false);
+  const [clearAllPassword, setClearAllPassword] = useState("");
+  const [isClearingAll, setIsClearingAll] = useState(false);
+
+  // Response warning state
+  const [collegesWithResponses, setCollegesWithResponses] = useState<
+    CollegeWithResponses[]
+  >([]);
+  const [showResponseWarning, setShowResponseWarning] = useState(false);
 
   // Expand/collapse state - default all expanded
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
@@ -455,9 +474,86 @@ export default function Questions() {
     setIsModalOpen(true);
   };
 
-  const openDeleteDialog = (question: Question) => {
+  // Check if a question (and its children) has any responses
+  const checkQuestionResponses = async (
+    questionId: string
+  ): Promise<CollegeWithResponses[]> => {
+    try {
+      // Get all descendant question IDs (including this question)
+      const getAllDescendantIds = (qId: string): string[] => {
+        const ids = [qId];
+        const findChildren = (items: Question[], targetId: string) => {
+          items.forEach((item) => {
+            if (item.id === targetId && item.children) {
+              item.children.forEach((child) => {
+                ids.push(child.id);
+                findChildren(questionTree, child.id);
+              });
+            } else if (item.children) {
+              findChildren(item.children, targetId);
+            }
+          });
+        };
+        findChildren(questionTree, qId);
+        return ids;
+      };
+
+      const questionIds = getAllDescendantIds(questionId);
+
+      // Get all responses for these questions
+      const { data: responses, error: responsesError } = await supabase
+        .from("responses")
+        .select(
+          `
+          id,
+          session_id,
+          evaluation_sessions!inner (
+            college_id,
+            colleges!inner (
+              id,
+              name,
+              code
+            )
+          )
+        `
+        )
+        .in("question_id", questionIds);
+
+      if (responsesError) throw responsesError;
+      if (!responses || responses.length === 0) return [];
+
+      // Extract unique colleges
+      const collegeMap = new Map<string, CollegeWithResponses>();
+      responses.forEach((r: any) => {
+        const college = r.evaluation_sessions?.colleges;
+        if (college && !collegeMap.has(college.id)) {
+          collegeMap.set(college.id, {
+            id: college.id,
+            name: college.name,
+            code: college.code,
+          });
+        }
+      });
+
+      return Array.from(collegeMap.values());
+    } catch (error) {
+      console.error("Error checking question responses:", error);
+      return [];
+    }
+  };
+
+  const openDeleteDialog = async (question: Question) => {
     setSelectedQuestion(question);
-    setIsDeleteOpen(true);
+
+    // Check for responses before opening delete dialog
+    const colleges = await checkQuestionResponses(question.id);
+    setCollegesWithResponses(colleges);
+
+    if (colleges.length > 0) {
+      setShowResponseWarning(true);
+    } else {
+      setIsDeleteOpen(true);
+    }
   };
 
   const handleSubmit = async (e: FormEvent) => {
@@ -521,12 +617,70 @@ export default function Questions() {
       if (error) throw error;
       showToast("Question deleted successfully", "success");
       setIsDeleteOpen(false);
+      setShowResponseWarning(false);
       fetchData();
     } catch (error) {
       console.error("Error deleting question:", error);
       showToast("Failed to delete question", "error");
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  const handleClearAllQuestions = async () => {
+    if (!user?.email || !areaId) {
+      showToast("Unable to clear questions", "error");
+      return;
+    }
+
+    if (!clearAllPassword.trim()) {
+      showToast("Please enter your password", "error");
+      return;
+    }
+
+    setIsClearingAll(true);
+    try {
+      // Verify admin password
+      const { error: authError } = await supabase.auth.signInWithPassword({
+        email: user.email,
+        password: clearAllPassword,
+      });
+
+      if (authError) {
+        showToast("Invalid password. Please try again.", "error");
+        return;
+      }
+
+      // Get all question IDs in this area
+      const questionIds = questions.map((q) => q.id);
+
+      if (questionIds.length > 0) {
+        // Delete all responses for these questions first
+        const { error: responsesError } = await supabase
+          .from("responses")
+          .delete()
+          .in("question_id", questionIds);
+
+        if (responsesError) throw responsesError;
+      }
+
+      // Delete all questions in this area
+      const { error: questionsError } = await supabase
+        .from("questions")
+        .delete()
+        .eq("area_id", areaId);
+
+      if (questionsError) throw questionsError;
+
+      showToast("All questions have been cleared", "success");
+      setShowClearAllModal(false);
+      setClearAllPassword("");
+      fetchData();
+    } catch (error) {
+      console.error("Error clearing questions:", error);
+      showToast("Failed to clear questions. Please try again.", "error");
+    } finally {
+      setIsClearingAll(false);
     }
   };
 
@@ -667,6 +821,28 @@ export default function Questions() {
                   Collapse All
                 </Button>
               </>
+            )}
+            {questionTree.length > 0 && (
+              <Button
+                variant="danger"
+                size="sm"
+                onClick={() => setShowClearAllModal(true)}
+              >
+                <svg
+                  className="w-4 h-4"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                  />
+                </svg>
+                Clear All
+              </Button>
             )}
             <Button onClick={() => openCreateModal(null)}>
               <svg
@@ -852,6 +1028,164 @@ export default function Questions() {
         confirmVariant="danger"
         isLoading={isSubmitting}
       />
+
+      {/* Delete Warning with Responses */}
+      <Modal
+        isOpen={showResponseWarning}
+        onClose={() => {
+          setShowResponseWarning(false);
+          setCollegesWithResponses([]);
+        }}
+        title="Warning: Question Has Responses"
+        size="md"
+      >
+        <div className="space-y-4">
+          <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+            <div className="flex items-start gap-3">
+              <svg
+                className="w-5 h-5 text-amber-600 shrink-0 mt-0.5"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
+                />
+              </svg>
+              <div>
+                <h4 className="font-semibold text-amber-800">
+                  This question has responses from colleges
+                </h4>
+                <p className="text-sm text-amber-700 mt-1">
+                  Deleting this question will also permanently delete all
+                  responses from the following colleges:
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-gray-50 rounded-lg p-4">
+            <h5 className="text-sm font-medium text-gray-700 mb-2">
+              Affected Colleges:
+            </h5>
+            <ul className="space-y-1">
+              {collegesWithResponses.map((college) => (
+                <li
+                  key={college.id}
+                  className="text-sm text-gray-600 flex items-center gap-2"
+                >
+                  <span className="w-2 h-2 bg-maroon-500 rounded-full" />
+                  {college.code ? `${college.code} - ` : ""}
+                  {college.name}
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          <p className="text-sm text-gray-600">
+            Are you sure you want to delete this question and all its responses?
+          </p>
+
+          <div className="flex justify-end gap-3 pt-2">
+            <Button
+              variant="secondary"
+              onClick={() => {
+                setShowResponseWarning(false);
+                setCollegesWithResponses([]);
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              onClick={handleDelete}
+              isLoading={isSubmitting}
+            >
+              Delete Anyway
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Clear All Questions Modal */}
+      <Modal
+        isOpen={showClearAllModal}
+        onClose={() => {
+          setShowClearAllModal(false);
+          setClearAllPassword("");
+        }}
+        title="Clear All Questions?"
+        size="md"
+      >
+        <div className="space-y-4">
+          <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+            <div className="flex items-start gap-3">
+              <svg
+                className="w-5 h-5 text-red-600 shrink-0 mt-0.5"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
+                />
+              </svg>
+              <div>
+                <h4 className="font-semibold text-red-800">Danger Zone</h4>
+                <p className="text-sm text-red-700 mt-1">
+                  This will <strong>permanently delete</strong>:
+                </p>
+                <ul className="text-sm text-red-700 mt-2 list-disc list-inside">
+                  <li>All {questions.length} questions in this area</li>
+                  <li>All responses for these questions</li>
+                </ul>
+                <p className="text-sm text-red-700 mt-2 font-medium">
+                  This action CANNOT be undone.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Enter your password to confirm
+            </label>
+            <input
+              type="password"
+              value={clearAllPassword}
+              onChange={(e) => setClearAllPassword(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-red-500"
+              placeholder="Your admin password"
+            />
+          </div>
+
+          <div className="flex justify-end gap-3 pt-2">
+            <Button
+              variant="secondary"
+              onClick={() => {
+                setShowClearAllModal(false);
+                setClearAllPassword("");
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              onClick={handleClearAllQuestions}
+              isLoading={isClearingAll}
+              disabled={!clearAllPassword.trim()}
+            >
+              Clear All Questions
+            </Button>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }

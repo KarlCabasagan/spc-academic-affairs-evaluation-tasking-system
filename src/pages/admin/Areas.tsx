@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import { Link } from "react-router-dom";
 import { supabase } from "../../lib/supabase";
+import { useAuth } from "../../context/AuthContext";
 import type { Area, AreaFormData } from "../../lib/types";
 import {
   Button,
@@ -14,13 +15,31 @@ import {
   showToast,
 } from "../../components/ui";
 
+interface CollegeWithResponses {
+  id: string;
+  name: string;
+  code: string | null;
+}
+
 export default function Areas() {
+  const { user } = useAuth();
   const [areas, setAreas] = useState<Area[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isDeleteOpen, setIsDeleteOpen] = useState(false);
   const [selectedArea, setSelectedArea] = useState<Area | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Clear all areas modal state
+  const [showClearAllModal, setShowClearAllModal] = useState(false);
+  const [clearAllPassword, setClearAllPassword] = useState("");
+  const [isClearingAll, setIsClearingAll] = useState(false);
+
+  // Response warning state
+  const [collegesWithResponses, setCollegesWithResponses] = useState<
+    CollegeWithResponses[]
+  >([]);
+  const [showResponseWarning, setShowResponseWarning] = useState(false);
 
   // Form state
   const [formData, setFormData] = useState<AreaFormData>({
@@ -50,6 +69,64 @@ export default function Areas() {
     }
   };
 
+  // Check if an area has any responses from colleges
+  const checkAreaResponses = async (
+    areaId: string
+  ): Promise<CollegeWithResponses[]> => {
+    try {
+      // Get all questions in this area
+      const { data: questions, error: questionsError } = await supabase
+        .from("questions")
+        .select("id")
+        .eq("area_id", areaId);
+
+      if (questionsError) throw questionsError;
+      if (!questions || questions.length === 0) return [];
+
+      const questionIds = questions.map((q) => q.id);
+
+      // Get all responses for these questions
+      const { data: responses, error: responsesError } = await supabase
+        .from("responses")
+        .select(
+          `
+          id,
+          session_id,
+          evaluation_sessions!inner (
+            college_id,
+            colleges!inner (
+              id,
+              name,
+              code
+            )
+          )
+        `
+        )
+        .in("question_id", questionIds);
+
+      if (responsesError) throw responsesError;
+      if (!responses || responses.length === 0) return [];
+
+      // Extract unique colleges
+      const collegeMap = new Map<string, CollegeWithResponses>();
+      responses.forEach((r: any) => {
+        const college = r.evaluation_sessions?.colleges;
+        if (college && !collegeMap.has(college.id)) {
+          collegeMap.set(college.id, {
+            id: college.id,
+            name: college.name,
+            code: college.code,
+          });
+        }
+      });
+
+      return Array.from(collegeMap.values());
+    } catch (error) {
+      console.error("Error checking area responses:", error);
+      return [];
+    }
+  };
+
   const openCreateModal = () => {
     setSelectedArea(null);
     setFormData({
@@ -71,9 +148,18 @@ export default function Areas() {
     setIsModalOpen(true);
   };
 
-  const openDeleteDialog = (area: Area) => {
+  const openDeleteDialog = async (area: Area) => {
     setSelectedArea(area);
-    setIsDeleteOpen(true);
+
+    // Check for responses before opening delete dialog
+    const colleges = await checkAreaResponses(area.id);
+    setCollegesWithResponses(colleges);
+
+    if (colleges.length > 0) {
+      setShowResponseWarning(true);
+    } else {
+      setIsDeleteOpen(true);
+    }
   };
 
   const handleSubmit = async (e: FormEvent) => {
@@ -134,12 +220,81 @@ export default function Areas() {
       if (error) throw error;
       showToast("Area deleted successfully", "success");
       setIsDeleteOpen(false);
+      setShowResponseWarning(false);
       fetchAreas();
     } catch (error) {
       console.error("Error deleting area:", error);
       showToast("Failed to delete area", "error");
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  const handleClearAllAreas = async () => {
+    if (!user?.email) {
+      showToast("User not authenticated", "error");
+      return;
+    }
+
+    if (!clearAllPassword.trim()) {
+      showToast("Please enter your password", "error");
+      return;
+    }
+
+    setIsClearingAll(true);
+    try {
+      // Verify admin password
+      const { error: authError } = await supabase.auth.signInWithPassword({
+        email: user.email,
+        password: clearAllPassword,
+      });
+
+      if (authError) {
+        showToast("Invalid password. Please try again.", "error");
+        return;
+      }
+
+      // Delete all responses first (foreign key constraint)
+      const { error: responsesError } = await supabase
+        .from("responses")
+        .delete()
+        .neq("id", "00000000-0000-0000-0000-000000000000");
+
+      if (responsesError) throw responsesError;
+
+      // Delete all evaluation sessions
+      const { error: sessionsError } = await supabase
+        .from("evaluation_sessions")
+        .delete()
+        .neq("id", "00000000-0000-0000-0000-000000000000");
+
+      if (sessionsError) throw sessionsError;
+
+      // Delete all questions
+      const { error: questionsError } = await supabase
+        .from("questions")
+        .delete()
+        .neq("id", "00000000-0000-0000-0000-000000000000");
+
+      if (questionsError) throw questionsError;
+
+      // Delete all areas
+      const { error: areasError } = await supabase
+        .from("areas")
+        .delete()
+        .neq("id", "00000000-0000-0000-0000-000000000000");
+
+      if (areasError) throw areasError;
+
+      showToast("All areas and questions have been cleared", "success");
+      setShowClearAllModal(false);
+      setClearAllPassword("");
+      fetchAreas();
+    } catch (error) {
+      console.error("Error clearing all areas:", error);
+      showToast("Failed to clear areas. Please try again.", "error");
+    } finally {
+      setIsClearingAll(false);
     }
   };
 
@@ -182,22 +337,42 @@ export default function Areas() {
             Manage PACUCOA evaluation areas and their questions
           </p>
         </div>
-        <Button onClick={openCreateModal}>
-          <svg
-            className="w-5 h-5"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={2}
-              d="M12 4v16m8-8H4"
-            />
-          </svg>
-          Add Area
-        </Button>
+        <div className="flex items-center gap-2">
+          {areas.length > 0 && (
+            <Button variant="danger" onClick={() => setShowClearAllModal(true)}>
+              <svg
+                className="w-4 h-4"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                />
+              </svg>
+              Clear All
+            </Button>
+          )}
+          <Button onClick={openCreateModal}>
+            <svg
+              className="w-5 h-5"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M12 4v16m8-8H4"
+              />
+            </svg>
+            Add Area
+          </Button>
+        </div>
       </div>
 
       {/* Areas List */}
@@ -429,7 +604,7 @@ export default function Areas() {
         </form>
       </Modal>
 
-      {/* Delete Confirmation */}
+      {/* Delete Confirmation (no responses) */}
       <ConfirmDialog
         isOpen={isDeleteOpen}
         onClose={() => setIsDeleteOpen(false)}
@@ -440,6 +615,166 @@ export default function Areas() {
         confirmVariant="danger"
         isLoading={isSubmitting}
       />
+
+      {/* Delete Warning with Responses */}
+      <Modal
+        isOpen={showResponseWarning}
+        onClose={() => {
+          setShowResponseWarning(false);
+          setCollegesWithResponses([]);
+        }}
+        title="Warning: Area Has Responses"
+        size="md"
+      >
+        <div className="space-y-4">
+          <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+            <div className="flex items-start gap-3">
+              <svg
+                className="w-5 h-5 text-amber-600 shrink-0 mt-0.5"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
+                />
+              </svg>
+              <div>
+                <h4 className="font-semibold text-amber-800">
+                  This area contains responses from colleges
+                </h4>
+                <p className="text-sm text-amber-700 mt-1">
+                  Deleting this area will also permanently delete all responses
+                  from the following colleges:
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-gray-50 rounded-lg p-4">
+            <h5 className="text-sm font-medium text-gray-700 mb-2">
+              Affected Colleges:
+            </h5>
+            <ul className="space-y-1">
+              {collegesWithResponses.map((college) => (
+                <li
+                  key={college.id}
+                  className="text-sm text-gray-600 flex items-center gap-2"
+                >
+                  <span className="w-2 h-2 bg-maroon-500 rounded-full" />
+                  {college.code ? `${college.code} - ` : ""}
+                  {college.name}
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          <p className="text-sm text-gray-600">
+            Are you sure you want to delete{" "}
+            <strong>"{selectedArea?.name}"</strong> and all its responses?
+          </p>
+
+          <div className="flex justify-end gap-3 pt-2">
+            <Button
+              variant="secondary"
+              onClick={() => {
+                setShowResponseWarning(false);
+                setCollegesWithResponses([]);
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              onClick={handleDelete}
+              isLoading={isSubmitting}
+            >
+              Delete Anyway
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Clear All Areas Modal */}
+      <Modal
+        isOpen={showClearAllModal}
+        onClose={() => {
+          setShowClearAllModal(false);
+          setClearAllPassword("");
+        }}
+        title="Clear All Areas?"
+        size="md"
+      >
+        <div className="space-y-4">
+          <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+            <div className="flex items-start gap-3">
+              <svg
+                className="w-5 h-5 text-red-600 shrink-0 mt-0.5"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
+                />
+              </svg>
+              <div>
+                <h4 className="font-semibold text-red-800">Danger Zone</h4>
+                <p className="text-sm text-red-700 mt-1">
+                  This will <strong>permanently delete</strong>:
+                </p>
+                <ul className="text-sm text-red-700 mt-2 list-disc list-inside">
+                  <li>All {areas.length} evaluation areas</li>
+                  <li>All questions in all areas</li>
+                  <li>All evaluation sessions and responses</li>
+                </ul>
+                <p className="text-sm text-red-700 mt-2 font-medium">
+                  This action CANNOT be undone.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Enter your password to confirm
+            </label>
+            <input
+              type="password"
+              value={clearAllPassword}
+              onChange={(e) => setClearAllPassword(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-red-500"
+              placeholder="Your admin password"
+            />
+          </div>
+
+          <div className="flex justify-end gap-3 pt-2">
+            <Button
+              variant="secondary"
+              onClick={() => {
+                setShowClearAllModal(false);
+                setClearAllPassword("");
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              onClick={handleClearAllAreas}
+              isLoading={isClearingAll}
+              disabled={!clearAllPassword.trim()}
+            >
+              Clear All Areas
+            </Button>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }

@@ -24,6 +24,7 @@ interface QuestionComplianceTreeProps {
  * - Leaf nodes show direct compliance status (Complied/Not Complied/N/A)
  * - Parent nodes show averaged compliance percentage of their children
  * - Zebra-striping for visual tracking on wide displays
+ * - End indicators for parent questions with subquestions
  */
 export default function QuestionComplianceTree({
   node,
@@ -115,7 +116,11 @@ export default function QuestionComplianceTree({
   const zebraClass = depth === 0 && index % 2 === 1 ? "bg-gray-50/50" : "";
 
   return (
-    <div className={indentClass}>
+    <div
+      className={`${indentClass} ${
+        depth === 0 && hasChildren && isExpanded ? "mb-4" : ""
+      }`}
+    >
       {/* Question Row with visual tracking guide */}
       <div
         className={`
@@ -189,6 +194,17 @@ export default function QuestionComplianceTree({
               index={childIndex}
             />
           ))}
+
+          {/* End Indicator - shows after the last child of a parent question */}
+          {depth === 0 && (
+            <div className="ml-6 flex items-center gap-2 py-1.5 px-3">
+              <div className="flex-1 border-t border-dashed border-gray-300" />
+              <span className="text-xs text-gray-400 italic">
+                End of {node.hierarchicalNumber}
+              </span>
+              <div className="flex-1 border-t border-dashed border-gray-300" />
+            </div>
+          )}
         </div>
       )}
     </div>

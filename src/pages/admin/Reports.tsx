@@ -7,7 +7,11 @@ import { Button, Card, Loading, showToast } from "../../components/ui";
 interface QuestionData {
   id: string;
   area_id: string;
+  parent_id: string | null;
 }
+
+// Display state for a cell - matches Responses.tsx logic
+type CellDisplayState = "no_questions" | "all_na" | "no_response" | "normal";
 
 interface MatrixCell {
   complied: number;
@@ -15,10 +19,13 @@ interface MatrixCell {
   notApplicable: number;
   compliance: number | null; // Percentage excluding N/A
   total: number;
+  hasQuestions: boolean;
+  displayState: CellDisplayState;
 }
 
 interface MatrixRow {
   area: Area;
+  hasQuestions: boolean;
   collegeData: Record<string, MatrixCell>;
 }
 
@@ -85,10 +92,10 @@ export default function Reports() {
       if (collegesError) throw collegesError;
       setColleges(collegesData || []);
 
-      // Fetch all questions (to map responses to areas)
+      // Fetch all questions (to map responses to areas and identify leaf nodes)
       const { data: questionsData, error: questionsError } = await supabase
         .from("questions")
-        .select("id, area_id")
+        .select("id, area_id, parent_id")
         .eq("is_active", true);
 
       if (questionsError) throw questionsError;
@@ -146,8 +153,26 @@ export default function Reports() {
       questionAreaMap.set(q.id, q.area_id);
     });
 
+    // Identify leaf questions (questions that don't have children)
+    const parentIds = new Set(
+      questionsData.map((q) => q.parent_id).filter(Boolean)
+    );
+    const leafQuestionIds = new Set(
+      questionsData.filter((q) => !parentIds.has(q.id)).map((q) => q.id)
+    );
+
+    // Count leaf questions per area
+    const leafQuestionsPerArea = new Map<string, number>();
+    questionsData.forEach((q) => {
+      if (leafQuestionIds.has(q.id)) {
+        const count = leafQuestionsPerArea.get(q.area_id) || 0;
+        leafQuestionsPerArea.set(q.area_id, count + 1);
+      }
+    });
+
     // Initialize matrix
     const matrix: MatrixRow[] = areasData.map((area) => {
+      const hasQuestions = (leafQuestionsPerArea.get(area.id) || 0) > 0;
       const collegeData: Record<string, MatrixCell> = {};
       collegesData.forEach((college) => {
         collegeData[college.id] = {
@@ -156,9 +181,11 @@ export default function Reports() {
           notApplicable: 0,
           compliance: null,
           total: 0,
+          hasQuestions,
+          displayState: hasQuestions ? "no_response" : "no_questions",
         };
       });
-      return { area, collegeData };
+      return { area, hasQuestions, collegeData };
     });
 
     // SSOT: For each college + area pair, track which we've already processed
@@ -175,12 +202,15 @@ export default function Reports() {
         processedCollegeAreas.set(session.college_id, processedAreas);
       }
 
-      // Group this session's responses by area
+      // Group this session's responses by area (only leaf questions)
       const responsesByArea = new Map<
         string,
         { question_id: string; status: ComplianceStatus }[]
       >();
       session.responses.forEach((r) => {
+        // Only count leaf question responses
+        if (!leafQuestionIds.has(r.question_id)) return;
+
         const areaId = questionAreaMap.get(r.question_id);
         if (areaId) {
           const existing = responsesByArea.get(areaId) || [];
@@ -219,41 +249,81 @@ export default function Reports() {
       });
     });
 
-    // Calculate compliance percentages (excluding N/A from denominator)
+    // Calculate compliance percentages and display states
     matrix.forEach((row) => {
       Object.values(row.collegeData).forEach((cell) => {
-        const denominator = cell.complied + cell.notComplied;
-        cell.compliance =
-          denominator > 0 ? (cell.complied / denominator) * 100 : null;
+        if (!cell.hasQuestions) {
+          // Area has no questions
+          cell.displayState = "no_questions";
+          cell.compliance = null;
+        } else if (cell.total === 0) {
+          // Area has questions but no responses from this college
+          cell.displayState = "no_response";
+          cell.compliance = 0; // Show 0% for areas with questions but no responses
+        } else {
+          const denominator = cell.complied + cell.notComplied;
+          if (denominator === 0 && cell.notApplicable > 0) {
+            // All responses are N/A
+            cell.displayState = "all_na";
+            cell.compliance = null;
+          } else if (denominator > 0) {
+            // Normal case with valid responses
+            cell.displayState = "normal";
+            cell.compliance = (cell.complied / denominator) * 100;
+          } else {
+            // Edge case: has responses but no valid denominator
+            cell.displayState = "no_response";
+            cell.compliance = 0;
+          }
+        }
       });
     });
 
-    // Calculate college totals
+    // Calculate college totals - EXCLUDE areas without questions AND areas where all responses are N/A
     const totals: Record<string, MatrixCell> = {};
     collegesData.forEach((college) => {
       let totalComplied = 0;
       let totalNotComplied = 0;
       let totalNotApplicable = 0;
       let totalResponses = 0;
+      let includedAreaCount = 0;
+      let complianceSum = 0;
 
       matrix.forEach((row) => {
         const cell = row.collegeData[college.id];
         if (cell) {
-          totalComplied += cell.complied;
-          totalNotComplied += cell.notComplied;
-          totalNotApplicable += cell.notApplicable;
-          totalResponses += cell.total;
+          // Only include areas that have questions and are not all N/A
+          if (
+            cell.hasQuestions &&
+            cell.displayState !== "all_na" &&
+            cell.displayState !== "no_questions"
+          ) {
+            totalComplied += cell.complied;
+            totalNotComplied += cell.notComplied;
+            totalNotApplicable += cell.notApplicable;
+            totalResponses += cell.total;
+
+            // For averaging by area (matching Responses.tsx logic)
+            if (cell.compliance !== null) {
+              complianceSum += cell.compliance;
+              includedAreaCount++;
+            }
+          }
         }
       });
 
-      const denominator = totalComplied + totalNotComplied;
+      // Calculate overall compliance as average of area compliances (matching Responses.tsx)
+      const overallCompliance =
+        includedAreaCount > 0 ? complianceSum / includedAreaCount : null;
+
       totals[college.id] = {
         complied: totalComplied,
         notComplied: totalNotComplied,
         notApplicable: totalNotApplicable,
-        compliance:
-          denominator > 0 ? (totalComplied / denominator) * 100 : null,
+        compliance: overallCompliance,
         total: totalResponses,
+        hasQuestions: true,
+        displayState: overallCompliance !== null ? "normal" : "no_response",
       };
     });
 
@@ -275,6 +345,23 @@ export default function Reports() {
     return "bg-red-50";
   };
 
+  const getCellDisplay = (cell: MatrixCell): string => {
+    switch (cell.displayState) {
+      case "no_questions":
+        return "—";
+      case "all_na":
+        return "N/A";
+      case "no_response":
+        return "0.0%";
+      case "normal":
+        return cell.compliance !== null
+          ? `${cell.compliance.toFixed(1)}%`
+          : "—";
+      default:
+        return "—";
+    }
+  };
+
   const exportToExcel = () => {
     if (matrixData.length === 0) {
       showToast("No data to export", "error");
@@ -291,9 +378,7 @@ export default function Reports() {
       ];
       colleges.forEach((college) => {
         const cell = row.collegeData[college.id];
-        dataRow.push(
-          cell?.compliance !== null ? `${cell.compliance.toFixed(1)}%` : "N/A"
-        );
+        dataRow.push(getCellDisplay(cell));
       });
       return dataRow;
     });
@@ -405,7 +490,7 @@ export default function Reports() {
         </div>
         <div className="flex items-center gap-2">
           <span className="w-3 h-3 rounded-full bg-gray-300" />
-          <span className="text-gray-600">No Data</span>
+          <span className="text-gray-600">No Data / N/A</span>
         </div>
       </div>
 
@@ -427,8 +512,9 @@ export default function Reports() {
           </svg>
           <p className="text-sm text-blue-800">
             <strong>Scoring Logic:</strong> Compliance percentages exclude "Not
-            Applicable" (N/A) responses from the denominator. Only "Complied"
-            and "Not Complied" statuses contribute to the final percentage.
+            Applicable" (N/A) responses from the denominator. Areas without
+            questions show "—", areas where all responses are N/A show "N/A",
+            and areas with no responses show "0%".
           </p>
         </div>
       </div>
@@ -490,28 +576,37 @@ export default function Reports() {
                         Area {row.area.area_number}:
                       </span>{" "}
                       <span className="text-gray-700">{row.area.name}</span>
+                      {!row.hasQuestions && (
+                        <span className="ml-2 text-xs text-gray-400">
+                          (no questions)
+                        </span>
+                      )}
                     </td>
                     {colleges.map((college) => {
                       const cell = row.collegeData[college.id];
+                      const displayValue = getCellDisplay(cell);
+                      const bgClass =
+                        cell.displayState === "all_na" ||
+                        cell.displayState === "no_questions"
+                          ? "bg-gray-50"
+                          : getComplianceBg(cell.compliance);
+                      const textClass =
+                        cell.displayState === "all_na" ||
+                        cell.displayState === "no_questions"
+                          ? "text-gray-400"
+                          : getComplianceColor(cell.compliance);
+
                       return (
                         <td
                           key={college.id}
-                          className={`px-4 py-3 text-center text-sm font-medium ${getComplianceBg(
-                            cell?.compliance
-                          )}`}
+                          className={`px-4 py-3 text-center text-sm font-medium ${bgClass}`}
                           title={`Complied: ${
                             cell?.complied || 0
                           }, Not Complied: ${cell?.notComplied || 0}, N/A: ${
                             cell?.notApplicable || 0
                           }`}
                         >
-                          <span
-                            className={getComplianceColor(cell?.compliance)}
-                          >
-                            {cell?.compliance !== null
-                              ? `${cell.compliance.toFixed(1)}%`
-                              : "—"}
-                          </span>
+                          <span className={textClass}>{displayValue}</span>
                         </td>
                       );
                     })}
