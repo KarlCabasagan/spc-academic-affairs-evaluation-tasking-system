@@ -1,37 +1,41 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { supabase } from "../../lib/supabase";
+import { useOfflineEvaluation } from "../../hooks/useOfflineEvaluation";
 import type { Area } from "../../lib/types";
-import { Card, Loading } from "../../components/ui";
+import {
+  Button,
+  Card,
+  Loading,
+  ConfirmDialog,
+  showToast,
+} from "../../components/ui";
 import heroImage from "../../assets/gorosei.jpg";
 
 export default function Landing() {
-  const [areas, setAreas] = useState<Area[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const {
+    isOnline,
+    isLoading,
+    areas,
+    completedAreas,
+    fetchAreas,
+    isAreaCompleted,
+    clearAllData,
+  } = useOfflineEvaluation();
+
   const [isImageLoaded, setIsImageLoaded] = useState(false);
+  const [showClearConfirm, setShowClearConfirm] = useState(false);
 
   useEffect(() => {
     fetchAreas();
-  }, []);
+  }, [fetchAreas]);
 
-  const fetchAreas = async () => {
-    try {
-      const { data, error } = await supabase
-        .from("areas")
-        .select("*")
-        .eq("is_active", true)
-        .order("area_number", { ascending: true });
-
-      if (error) throw error;
-      setAreas(data || []);
-    } catch (err) {
-      setError("Failed to load areas. Please try again later.");
-      console.error("Error fetching areas:", err);
-    } finally {
-      setIsLoading(false);
-    }
+  const handleClearAllData = () => {
+    clearAllData();
+    showToast("All evaluation data has been cleared", "success");
+    setShowClearConfirm(false);
   };
+
+  const hasCompletedAreas = completedAreas.length > 0;
 
   if (isLoading) {
     return (
@@ -41,34 +45,18 @@ export default function Landing() {
     );
   }
 
-  if (error) {
-    return (
-      <div className="max-w-2xl mx-auto px-4 py-16 text-center">
-        <div className="bg-red-50 border border-red-200 rounded-xl p-6">
-          <svg
-            className="w-12 h-12 text-red-500 mx-auto mb-4"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={2}
-              d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
-            />
-          </svg>
-          <h2 className="text-lg font-semibold text-red-800 mb-2">
-            Something went wrong
-          </h2>
-          <p className="text-red-600">{error}</p>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="animate-fade-in">
+      {/* Offline Indicator */}
+      {!isOnline && (
+        <div className="bg-amber-100 border-b border-amber-200 px-4 py-2 text-center">
+          <p className="text-sm text-amber-800">
+            <span className="font-medium">Offline Mode:</span> Working with
+            cached data. Your responses are saved locally.
+          </p>
+        </div>
+      )}
+
       {/* Hero Section */}
       <section className="relative overflow-hidden text-white py-16 sm:py-24">
         {/* Preload Image */}
@@ -98,9 +86,8 @@ export default function Landing() {
               </span>
             </h1>
             <p className="text-lg sm:text-xl text-maroon-100 mb-8 leading-relaxed">
-              Help us improve by evaluating specific areas of our academic
-              program. Your anonymous feedback is valuable for our continuous
-              improvement.
+              Evaluate specific areas of our academic program. Your responses
+              are saved locally and can be exported to Excel for your records.
             </p>
             <div className="flex flex-wrap justify-center gap-4 text-sm">
               <div className="flex items-center gap-2 bg-white/10 rounded-full px-4 py-2">
@@ -114,10 +101,10 @@ export default function Landing() {
                     strokeLinecap="round"
                     strokeLinejoin="round"
                     strokeWidth={2}
-                    d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"
+                    d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"
                   />
                 </svg>
-                Anonymous
+                Export to Excel
               </div>
               <div className="flex items-center gap-2 bg-white/10 rounded-full px-4 py-2">
                 <svg
@@ -133,7 +120,7 @@ export default function Landing() {
                     d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"
                   />
                 </svg>
-                Quick & Easy
+                Works Offline
               </div>
               <div className="flex items-center gap-2 bg-white/10 rounded-full px-4 py-2">
                 <svg
@@ -156,6 +143,75 @@ export default function Landing() {
         </div>
       </section>
 
+      {/* Action Buttons */}
+      {hasCompletedAreas && (
+        <section className="bg-maroon-50 border-b border-maroon-100 py-4">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div className="flex items-center gap-2 text-maroon-800">
+                <svg
+                  className="w-5 h-5"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
+                  />
+                </svg>
+                <span className="font-medium">
+                  {completedAreas.length} area
+                  {completedAreas.length > 1 ? "s" : ""} completed
+                </span>
+              </div>
+              <div className="flex items-center gap-3">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => setShowClearConfirm(true)}
+                >
+                  <svg
+                    className="w-4 h-4"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                    />
+                  </svg>
+                  Clear All Data
+                </Button>
+                <Link to="/public/export">
+                  <Button size="sm">
+                    <svg
+                      className="w-4 h-4"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+                      />
+                    </svg>
+                    Export Results
+                  </Button>
+                </Link>
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
+
       {/* Areas Grid */}
       <section className="py-12 sm:py-16 lg:py-20">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -164,8 +220,8 @@ export default function Landing() {
               Select an Area to Evaluate
             </h2>
             <p className="text-gray-600 max-w-2xl mx-auto">
-              Choose any area below to begin your evaluation. You can evaluate
-              multiple areas independently at your own pace.
+              Choose any area below to begin your evaluation. Your responses are
+              saved automatically and you can return to edit them anytime.
             </p>
           </div>
 
@@ -185,50 +241,89 @@ export default function Landing() {
                 />
               </svg>
               <p className="text-gray-500">
-                No evaluation areas are currently available.
+                {isOnline
+                  ? "No evaluation areas are currently available."
+                  : "No cached areas available. Please connect to the internet to load areas."}
               </p>
             </div>
           ) : (
             <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
-              {areas.map((area, index) => (
-                <Link
-                  key={area.id}
-                  to={`/evaluate/${area.id}`}
-                  className="group block animate-slide-up"
-                  style={{ animationDelay: `${index * 50}ms` }}
-                >
-                  <Card hover className="h-full">
-                    <div className="flex items-start gap-4">
-                      <div className="shrink-0 w-12 h-12 bg-maroon-100 text-maroon-800 rounded-xl flex items-center justify-center font-bold text-lg group-hover:bg-maroon-800 group-hover:text-white transition-colors">
-                        {area.area_number}
+              {areas.map((area: Area, index: number) => {
+                const isCompleted = isAreaCompleted(area.id);
+                return (
+                  <Link
+                    key={area.id}
+                    to={`/public/evaluate/${area.id}`}
+                    className="group block animate-slide-up"
+                    style={{ animationDelay: `${index * 50}ms` }}
+                  >
+                    <Card
+                      hover
+                      className={`h-full ${
+                        isCompleted ? "ring-2 ring-green-500" : ""
+                      }`}
+                    >
+                      <div className="flex items-start gap-4">
+                        <div
+                          className={`shrink-0 w-12 h-12 rounded-xl flex items-center justify-center font-bold text-lg transition-colors ${
+                            isCompleted
+                              ? "bg-green-100 text-green-700 group-hover:bg-green-700 group-hover:text-white"
+                              : "bg-maroon-100 text-maroon-800 group-hover:bg-maroon-800 group-hover:text-white"
+                          }`}
+                        >
+                          {isCompleted ? (
+                            <svg
+                              className="w-6 h-6"
+                              fill="none"
+                              stroke="currentColor"
+                              viewBox="0 0 24 24"
+                            >
+                              <path
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                strokeWidth={2}
+                                d="M5 13l4 4L19 7"
+                              />
+                            </svg>
+                          ) : (
+                            area.area_number
+                          )}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <h3 className="font-semibold text-gray-900 group-hover:text-maroon-800 transition-colors">
+                              {area.name}
+                            </h3>
+                            {isCompleted && (
+                              <span className="shrink-0 px-2 py-0.5 bg-green-100 text-green-700 text-xs font-medium rounded-full">
+                                Completed
+                              </span>
+                            )}
+                          </div>
+                          {area.description && (
+                            <p className="text-sm text-gray-500 line-clamp-2 mt-1">
+                              {area.description}
+                            </p>
+                          )}
+                        </div>
+                        <svg
+                          className="w-5 h-5 text-gray-400 group-hover:text-maroon-800 group-hover:translate-x-1 transition-all shrink-0"
+                          fill="none"
+                          stroke="currentColor"
+                          viewBox="0 0 24 24"
+                        >
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth={2}
+                            d="M9 5l7 7-7 7"
+                          />
+                        </svg>
                       </div>
-                      <div className="flex-1 min-w-0">
-                        <h3 className="font-semibold text-gray-900 group-hover:text-maroon-800 transition-colors mb-1">
-                          {area.name}
-                        </h3>
-                        {area.description && (
-                          <p className="text-sm text-gray-500 line-clamp-2">
-                            {area.description}
-                          </p>
-                        )}
-                      </div>
-                      <svg
-                        className="w-5 h-5 text-gray-400 group-hover:text-maroon-800 group-hover:translate-x-1 transition-all shrink-0"
-                        fill="none"
-                        stroke="currentColor"
-                        viewBox="0 0 24 24"
-                      >
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          strokeWidth={2}
-                          d="M9 5l7 7-7 7"
-                        />
-                      </svg>
-                    </div>
-                  </Card>
-                </Link>
-              ))}
+                    </Card>
+                  </Link>
+                );
+              })}
             </div>
           )}
         </div>
@@ -261,7 +356,7 @@ export default function Landing() {
                   Answer Questions
                 </h4>
                 <p className="text-sm text-gray-600">
-                  Rate each item as Complied, Not Complied, or Not Applicable.
+                  Rate each item and mark the area complete when done.
                 </p>
               </div>
               <div className="text-center">
@@ -269,17 +364,27 @@ export default function Landing() {
                   3
                 </div>
                 <h4 className="font-medium text-gray-900 mb-2">
-                  Submit Anonymously
+                  Export Results
                 </h4>
                 <p className="text-sm text-gray-600">
-                  Your responses are submitted without any personal
-                  identification.
+                  Download your responses as an Excel file for your records.
                 </p>
               </div>
             </div>
           </div>
         </div>
       </section>
+
+      {/* Clear All Confirmation */}
+      <ConfirmDialog
+        isOpen={showClearConfirm}
+        onClose={() => setShowClearConfirm(false)}
+        onConfirm={handleClearAllData}
+        title="Clear All Data?"
+        message="This will permanently delete all your saved responses and completion status. This action cannot be undone."
+        confirmText="Clear All"
+        confirmVariant="danger"
+      />
     </div>
   );
 }

@@ -33,11 +33,11 @@ export default function Header() {
     }
     // Loading state
     if (hasAdmin === null) {
-      return { to: "/admin/login", text: "Admin" };
+      return { to: "/login", text: "Login" };
     }
     // Show login or register based on admin existence
     if (hasAdmin) {
-      return { to: "/admin/login", text: "Admin Login" };
+      return { to: "/login", text: "Login" };
     }
     return { to: "/admin/register", text: "Setup Admin" };
   };

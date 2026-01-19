@@ -1,26 +1,18 @@
-import { useEffect, useState } from "react";
-import { useParams, useNavigate, Link } from "react-router-dom";
-import { v4 as uuidv4 } from "uuid";
+import { useEffect, useState, useCallback } from "react";
+import { useParams, Link, useNavigate } from "react-router-dom";
+import {
+  useOfflineEvaluation,
+  type StoredResponse,
+} from "../../hooks/useOfflineEvaluation";
+import type { Area, Question, ComplianceStatus } from "../../lib/types";
 import { supabase } from "../../lib/supabase";
-import type {
-  Area,
-  Question,
-  ComplianceStatus,
-  ResponseFormData,
-  College,
-} from "../../lib/types";
 import {
   Button,
   Card,
-  Input,
   Loading,
   Textarea,
   showToast,
 } from "../../components/ui";
-
-interface QuestionResponse extends ResponseFormData {
-  answered: boolean;
-}
 
 // Build hierarchical tree from flat question array
 function buildQuestionTree(questions: Question[]): Question[] {
@@ -90,7 +82,7 @@ function getLeafQuestions(questions: Question[]): Question[] {
 interface QuestionItemProps {
   question: Question;
   depth: number;
-  responses: Map<string, QuestionResponse>;
+  responses: Map<string, StoredResponse>;
   onStatusChange: (questionId: string, status: ComplianceStatus) => void;
   onCommentChange: (questionId: string, comment: string) => void;
 }
@@ -106,8 +98,6 @@ function QuestionItem({
   const response = responses.get(question.id);
 
   // Calculate responsive indentation (reduced on mobile)
-  // Desktop: 16px per level (max 4 levels = 64px)
-  // Mobile: 8px per level (max 2 levels = 16px)
   const effectiveDepth = Math.min(depth, 4);
 
   // Parent questions (with children) are rendered as description headings
@@ -215,7 +205,7 @@ function QuestionItem({
             )}
           </p>
 
-          {/* Response Buttons - Stack on mobile for better touch targets */}
+          {/* Response Buttons */}
           <div className="flex flex-col sm:flex-row flex-wrap gap-2 mb-4">
             <button
               onClick={() => onStatusChange(question.id, "complied")}
@@ -316,49 +306,41 @@ function QuestionItem({
 
 export default function Evaluate() {
   const { areaId } = useParams<{ areaId: string }>();
+  const {
+    isOnline,
+    fetchQuestions,
+    getResponses,
+    saveResponses,
+    markAreaComplete,
+    isAreaCompleted,
+    clearAreaResponses,
+  } = useOfflineEvaluation();
+
   const navigate = useNavigate();
 
   const [area, setArea] = useState<Area | null>(null);
-  const [, setQuestions] = useState<Question[]>([]);
   const [questionTree, setQuestionTree] = useState<Question[]>([]);
   const [leafQuestions, setLeafQuestions] = useState<Question[]>([]);
-  const [responses, setResponses] = useState<Map<string, QuestionResponse>>(
+  const [responses, setResponses] = useState<Map<string, StoredResponse>>(
     new Map()
   );
   const [isLoading, setIsLoading] = useState(true);
-  const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [isCompleted, setIsCompleted] = useState(false);
 
-  // Guest identification
-  const [colleges, setColleges] = useState<College[]>([]);
-  const [guestName, setGuestName] = useState("");
-  const [collegeId, setCollegeId] = useState("");
-
+  // Fetch area info and questions
   useEffect(() => {
     if (areaId) {
-      fetchAreaAndQuestions();
-      fetchColleges();
+      loadAreaData();
     }
   }, [areaId]);
 
-  const fetchColleges = async () => {
-    try {
-      const { data, error } = await supabase
-        .from("colleges")
-        .select("*")
-        .eq("is_active", true)
-        .order("name", { ascending: true });
+  const loadAreaData = async () => {
+    if (!areaId) return;
 
-      if (error) throw error;
-      setColleges(data || []);
-    } catch (err) {
-      console.error("Error fetching colleges:", err);
-    }
-  };
-
-  const fetchAreaAndQuestions = async () => {
+    setIsLoading(true);
     try {
-      // Fetch area
+      // Fetch area info
       const { data: areaData, error: areaError } = await supabase
         .from("areas")
         .select("*")
@@ -371,34 +353,37 @@ export default function Evaluate() {
 
       setArea(areaData);
 
-      // Fetch questions
-      const { data: questionsData, error: questionsError } = await supabase
-        .from("questions")
-        .select("*")
-        .eq("area_id", areaId)
-        .eq("is_active", true)
-        .order("question_order", { ascending: true });
-
-      if (questionsError) throw questionsError;
-      setQuestions(questionsData || []);
+      // Fetch questions (with offline support)
+      const questionsData = await fetchQuestions(areaId);
 
       // Build tree and get leaves
-      const tree = buildQuestionTree(questionsData || []);
+      const tree = buildQuestionTree(questionsData);
       setQuestionTree(tree);
       const leaves = getLeafQuestions(tree);
       setLeafQuestions(leaves);
 
-      // Initialize responses map for leaf questions only
-      const initialResponses = new Map<string, QuestionResponse>();
+      // Load saved responses from localStorage
+      const savedResponses = getResponses(areaId);
+      const responsesMap = new Map<string, StoredResponse>();
+
+      // Initialize all leaf questions
       leaves.forEach((q) => {
-        initialResponses.set(q.id, {
-          question_id: q.id,
-          status: "not_applicable",
-          comment: "",
-          answered: false,
-        });
+        const saved = savedResponses[q.id];
+        if (saved) {
+          responsesMap.set(q.id, saved);
+        } else {
+          responsesMap.set(q.id, {
+            questionId: q.id,
+            status: "not_applicable",
+            comment: "",
+            answered: false,
+          });
+        }
       });
-      setResponses(initialResponses);
+      setResponses(responsesMap);
+
+      // Check if this area is already completed
+      setIsCompleted(isAreaCompleted(areaId));
     } catch (err) {
       setError(
         "Failed to load evaluation. The area may not exist or is unavailable."
@@ -408,6 +393,24 @@ export default function Evaluate() {
       setIsLoading(false);
     }
   };
+
+  // Auto-save responses to localStorage whenever they change
+  const saveCurrentResponses = useCallback(() => {
+    if (!areaId) return;
+    const responsesObj: { [key: string]: StoredResponse } = {};
+    responses.forEach((value, key) => {
+      responsesObj[key] = value;
+    });
+    saveResponses(areaId, responsesObj);
+  }, [areaId, responses, saveResponses]);
+
+  // Debounced save on response change
+  useEffect(() => {
+    if (responses.size > 0) {
+      const timer = setTimeout(saveCurrentResponses, 500);
+      return () => clearTimeout(timer);
+    }
+  }, [responses, saveCurrentResponses]);
 
   const handleStatusChange = (questionId: string, status: ComplianceStatus) => {
     setResponses((prev) => {
@@ -441,16 +444,8 @@ export default function Evaluate() {
     );
   };
 
-  const handleSubmit = async () => {
-    // Validate guest info
-    if (!guestName.trim()) {
-      showToast("Please enter your full name", "error");
-      return;
-    }
-    if (!collegeId) {
-      showToast("Please select your college", "error");
-      return;
-    }
+  const handleMarkComplete = () => {
+    if (!areaId) return;
 
     const requiredUnanswered = getRequiredUnanswered();
     if (requiredUnanswered.length > 0) {
@@ -461,53 +456,43 @@ export default function Evaluate() {
       return;
     }
 
-    setIsSubmitting(true);
-    try {
-      // Create session with guest info
-      const sessionToken = uuidv4();
-      const { data: sessionData, error: sessionError } = await supabase
-        .from("evaluation_sessions")
-        .insert({
-          session_token: sessionToken,
-          guest_name: guestName.trim(),
-          college_id: collegeId,
-        })
-        .select()
-        .single();
+    // Save final responses
+    saveCurrentResponses();
 
-      if (sessionError) throw sessionError;
+    // Mark area as complete
+    markAreaComplete(areaId);
+    setIsCompleted(true);
 
-      // Insert responses (only leaf questions with answers)
-      const responsesToInsert = Array.from(responses.entries())
-        .filter(([, r]) => r.answered)
-        .map(([, r]) => ({
-          session_id: sessionData.id,
-          question_id: r.question_id,
-          status: r.status,
-          comment: r.comment || null,
-        }));
+    showToast(
+      isCompleted
+        ? "Responses updated successfully!"
+        : "Area marked as complete!",
+      "success"
+    );
 
-      if (responsesToInsert.length > 0) {
-        const { error: responsesError } = await supabase
-          .from("responses")
-          .insert(responsesToInsert);
+    // Redirect back to area list
+    navigate("/public");
+  };
 
-        if (responsesError) throw responsesError;
-      }
+  const handleClearResponses = () => {
+    if (!areaId) return;
 
-      // Mark session as complete
-      await supabase
-        .from("evaluation_sessions")
-        .update({ is_complete: true, completed_at: new Date().toISOString() })
-        .eq("id", sessionData.id);
+    clearAreaResponses(areaId);
 
-      navigate("/complete", { state: { areaName: area?.name } });
-    } catch (err) {
-      console.error("Error submitting evaluation:", err);
-      showToast("Failed to submit evaluation. Please try again.", "error");
-    } finally {
-      setIsSubmitting(false);
-    }
+    // Reset local state
+    const newResponses = new Map<string, StoredResponse>();
+    leafQuestions.forEach((q) => {
+      newResponses.set(q.id, {
+        questionId: q.id,
+        status: "not_applicable",
+        comment: "",
+        answered: false,
+      });
+    });
+    setResponses(newResponses);
+    setIsCompleted(false);
+
+    showToast("Responses cleared for this area", "success");
   };
 
   if (isLoading) {
@@ -549,11 +534,21 @@ export default function Evaluate() {
 
   return (
     <div className="animate-fade-in pb-24">
+      {/* Offline Indicator */}
+      {!isOnline && (
+        <div className="bg-amber-100 border-b border-amber-200 px-4 py-2 text-center">
+          <p className="text-sm text-amber-800">
+            <span className="font-medium">Offline Mode:</span> Your responses
+            are saved locally.
+          </p>
+        </div>
+      )}
+
       {/* Area Header */}
       <div className="bg-linear-to-r from-maroon-800 to-maroon-900 text-white py-8 sm:py-12">
         <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
           <Link
-            to="/"
+            to="/public"
             className="inline-flex items-center gap-2 text-maroon-200 hover:text-white transition-colors mb-4"
           >
             <svg
@@ -572,15 +567,42 @@ export default function Evaluate() {
             Back to Areas
           </Link>
           <div className="flex items-start gap-4">
-            <div className="shrink-0 w-14 h-14 bg-white/10 rounded-xl flex items-center justify-center font-bold text-2xl">
-              {area.area_number}
+            <div
+              className={`shrink-0 w-14 h-14 rounded-xl flex items-center justify-center font-bold text-2xl ${
+                isCompleted ? "bg-green-500/20" : "bg-white/10"
+              }`}
+            >
+              {isCompleted ? (
+                <svg
+                  className="w-8 h-8"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M5 13l4 4L19 7"
+                  />
+                </svg>
+              ) : (
+                area.area_number
+              )}
             </div>
             <div>
-              <h1 className="text-2xl sm:text-3xl font-bold mb-2">
-                Area {area.area_number}: {area.name}
-              </h1>
+              <div className="flex items-center gap-3">
+                <h1 className="text-2xl sm:text-3xl font-bold">
+                  Area {area.area_number}: {area.name}
+                </h1>
+                {isCompleted && (
+                  <span className="px-2 py-1 bg-green-500/20 text-green-200 text-sm font-medium rounded-full">
+                    Completed
+                  </span>
+                )}
+              </div>
               {area.description && (
-                <p className="text-maroon-100">{area.description}</p>
+                <p className="text-maroon-100 mt-2">{area.description}</p>
               )}
             </div>
           </div>
@@ -614,64 +636,8 @@ export default function Evaluate() {
         </div>
       </div>
 
-      {/* Guest Information */}
-      <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 pt-8">
-        <Card className="mb-6">
-          <div className="flex items-start gap-3 mb-4">
-            <div className="w-8 h-8 bg-maroon-100 text-maroon-800 rounded-lg flex items-center justify-center shrink-0">
-              <svg
-                className="w-4 h-4"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"
-                />
-              </svg>
-            </div>
-            <div>
-              <h2 className="font-semibold text-gray-900">Your Information</h2>
-              <p className="text-sm text-gray-500">
-                Please provide your details before answering the evaluation
-              </p>
-            </div>
-          </div>
-          <div className="grid gap-4 sm:grid-cols-2">
-            <Input
-              label="Full Name"
-              placeholder="Enter your full name"
-              value={guestName}
-              onChange={(e) => setGuestName(e.target.value)}
-              required
-            />
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1.5">
-                College <span className="text-red-500">*</span>
-              </label>
-              <select
-                className="w-full px-4 py-2.5 bg-white border border-gray-300 rounded-lg text-gray-900 focus:outline-none focus:ring-2 focus:ring-maroon-500 focus:border-transparent transition-colors"
-                value={collegeId}
-                onChange={(e) => setCollegeId(e.target.value)}
-                required
-              >
-                <option value="">Select your college</option>
-                {colleges.map((college) => (
-                  <option key={college.id} value={college.id}>
-                    {college.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
-        </Card>
-      </div>
-
       {/* Questions */}
-      <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 pb-8 overflow-x-hidden">
+      <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8 overflow-x-hidden">
         {questionTree.length === 0 ? (
           <Card className="text-center py-12">
             <svg
@@ -710,31 +676,69 @@ export default function Evaluate() {
         )}
       </div>
 
-      {/* Submit Footer */}
+      {/* Footer Actions */}
       {leafQuestions.length > 0 && (
         <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 shadow-lg z-30">
           <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
             <div className="flex items-center justify-between gap-4">
-              <div className="text-sm text-gray-600">
-                {getRequiredUnanswered().length > 0 ? (
-                  <span className="text-amber-600">
-                    {getRequiredUnanswered().length} required question(s)
-                    remaining
-                  </span>
-                ) : (
-                  <span className="text-green-600">
-                    All required questions answered ✓
-                  </span>
-                )}
+              <div className="flex items-center gap-3">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={handleClearResponses}
+                >
+                  <svg
+                    className="w-4 h-4"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                    />
+                  </svg>
+                  Clear
+                </Button>
+                <div className="text-sm text-gray-600">
+                  {getRequiredUnanswered().length > 0 ? (
+                    <span className="text-amber-600">
+                      {getRequiredUnanswered().length} required remaining
+                    </span>
+                  ) : (
+                    <span className="text-green-600">
+                      All required answered ✓
+                    </span>
+                  )}
+                </div>
               </div>
-              <Button
-                size="lg"
-                onClick={handleSubmit}
-                isLoading={isSubmitting}
-                disabled={getRequiredUnanswered().length > 0}
-              >
-                Submit Evaluation
-              </Button>
+              <div className="flex items-center gap-3">
+                {isCompleted && (
+                  <Link to="/public/export">
+                    <Button variant="secondary" size="lg">
+                      <svg
+                        className="w-4 h-4"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+                        />
+                      </svg>
+                      Export
+                    </Button>
+                  </Link>
+                )}
+                <Button size="lg" onClick={handleMarkComplete}>
+                  {isCompleted ? "Update Response" : "Mark Complete"}
+                </Button>
+              </div>
             </div>
           </div>
         </div>

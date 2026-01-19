@@ -686,16 +686,36 @@ export default function Questions() {
 
   const toggleActive = async (question: Question) => {
     try {
+      // Get all descendant IDs including the question itself
+      const getAllDescendantIds = (q: Question): string[] => {
+        const ids = [q.id];
+        if (q.children?.length) {
+          q.children.forEach((child) => {
+            ids.push(...getAllDescendantIds(child));
+          });
+        }
+        return ids;
+      };
+
+      const questionIds = getAllDescendantIds(question);
+      const newStatus = !question.is_active;
+
       const { error } = await supabase
         .from("questions")
-        .update({ is_active: !question.is_active })
-        .eq("id", question.id);
+        .update({ is_active: newStatus })
+        .in("id", questionIds);
 
       if (error) throw error;
-      showToast(
-        `Question ${question.is_active ? "deactivated" : "activated"}`,
-        "success"
-      );
+
+      const childCount = questionIds.length - 1;
+      const message =
+        childCount > 0
+          ? `Question and ${childCount} sub-question${
+              childCount > 1 ? "s" : ""
+            } ${newStatus ? "activated" : "deactivated"}`
+          : `Question ${newStatus ? "activated" : "deactivated"}`;
+
+      showToast(message, "success");
       fetchData();
     } catch (error) {
       console.error("Error toggling question:", error);

@@ -1,11 +1,12 @@
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider, useAuth } from "./context/AuthContext";
-import { AdminLayout, CollegeLayout } from "./components/layout";
+import { AdminLayout, CollegeLayout, PublicLayout } from "./components/layout";
 import { ToastContainer } from "./components/ui";
 import { Loading } from "./components/ui";
 import ForgotPassword from "./pages/ForgotPassword";
 import ResetPassword from "./pages/ResetPassword";
 import { CollegeDashboard, CollegeEvaluate } from "./pages/college";
+import { Landing, Evaluate, Complete, ExportPage } from "./pages/public";
 import {
   Login,
   Register,
@@ -26,8 +27,9 @@ function RootRedirect() {
     return <Loading fullScreen text="Loading..." />;
   }
 
+  // If not logged in, show the public landing page
   if (!user) {
-    return <Navigate to="/login" replace />;
+    return <Navigate to="/public" replace />;
   }
 
   if (userRole === "college") {
@@ -44,6 +46,28 @@ function App() {
         <Routes>
           {/* Root - Redirect based on auth state */}
           <Route path="/" element={<RootRedirect />} />
+
+          {/* Public Routes (no auth required) */}
+          <Route path="/public" element={<PublicLayout />}>
+            <Route index element={<Landing />} />
+            <Route path="evaluate/:areaId" element={<Evaluate />} />
+            <Route path="export" element={<ExportPage />} />
+            <Route path="complete" element={<Complete />} />
+          </Route>
+
+          {/* Shortcut routes for public pages */}
+          <Route
+            path="/evaluate/:areaId"
+            element={<Navigate to="/public/evaluate/:areaId" replace />}
+          />
+          <Route
+            path="/export"
+            element={<Navigate to="/public/export" replace />}
+          />
+          <Route
+            path="/complete"
+            element={<Navigate to="/public/complete" replace />}
+          />
 
           {/* Auth Routes */}
           <Route path="/login" element={<Login />} />
