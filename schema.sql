@@ -371,3 +371,86 @@ $$;
 -- Grant execute permission to authenticated users (admins calling this)
 GRANT EXECUTE ON FUNCTION public.assign_college_role(UUID) TO authenticated;
 
+-- ============================================
+-- Evaluation History Tables (for archiving reset data)
+-- ============================================
+
+-- History batches: Each reset creates one history record
+CREATE TABLE evaluation_history (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name VARCHAR(255) NOT NULL,
+    archived_at TIMESTAMPTZ DEFAULT NOW(),
+    archived_by UUID REFERENCES auth.users(id) ON DELETE SET NULL,
+    total_sessions INTEGER DEFAULT 0,
+    total_responses INTEGER DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Archived sessions with denormalized college info
+CREATE TABLE history_sessions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    history_id UUID NOT NULL REFERENCES evaluation_history(id) ON DELETE CASCADE,
+    original_session_id UUID NOT NULL,
+    college_id UUID,
+    college_name VARCHAR(255),
+    college_code VARCHAR(50),
+    session_token VARCHAR(255),
+    started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ
+);
+
+-- Archived responses with denormalized question/area info
+CREATE TABLE history_responses (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    history_session_id UUID NOT NULL REFERENCES history_sessions(id) ON DELETE CASCADE,
+    original_response_id UUID NOT NULL,
+    question_id UUID,
+    question_text TEXT,
+    question_parent_id UUID,
+    question_order INTEGER,
+    area_id UUID,
+    area_number INTEGER,
+    area_name VARCHAR(255),
+    status compliance_status NOT NULL,
+    comment TEXT
+);
+
+-- Indexes for history tables
+CREATE INDEX idx_history_sessions_history_id ON history_sessions(history_id);
+CREATE INDEX idx_history_responses_session_id ON history_responses(history_session_id);
+
+-- Trigger for updated_at on evaluation_history
+CREATE TRIGGER update_evaluation_history_updated_at
+    BEFORE UPDATE ON evaluation_history
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- ============================================
+-- RLS Policies for History Tables
+-- ============================================
+
+-- Enable RLS on history tables
+ALTER TABLE evaluation_history ENABLE ROW LEVEL SECURITY;
+ALTER TABLE history_sessions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE history_responses ENABLE ROW LEVEL SECURITY;
+
+-- Evaluation History: Admin only
+CREATE POLICY "Admin full access to evaluation_history"
+ON evaluation_history FOR ALL
+TO authenticated
+USING (public.get_user_role(auth.uid()) = 'admin')
+WITH CHECK (public.get_user_role(auth.uid()) = 'admin');
+
+-- History Sessions: Admin only
+CREATE POLICY "Admin full access to history_sessions"
+ON history_sessions FOR ALL
+TO authenticated
+USING (public.get_user_role(auth.uid()) = 'admin')
+WITH CHECK (public.get_user_role(auth.uid()) = 'admin');
+
+-- History Responses: Admin only
+CREATE POLICY "Admin full access to history_responses"
+ON history_responses FOR ALL
+TO authenticated
+USING (public.get_user_role(auth.uid()) = 'admin')
+WITH CHECK (public.get_user_role(auth.uid()) = 'admin');

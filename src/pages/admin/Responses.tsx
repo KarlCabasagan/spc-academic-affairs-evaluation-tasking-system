@@ -69,7 +69,7 @@ export default function Responses() {
         { event: "*", schema: "public", table: "evaluation_sessions" },
         () => {
           fetchComplianceData();
-        }
+        },
       )
       .subscribe();
 
@@ -80,7 +80,7 @@ export default function Responses() {
         { event: "*", schema: "public", table: "responses" },
         () => {
           fetchComplianceData();
-        }
+        },
       )
       .subscribe();
 
@@ -115,6 +115,143 @@ export default function Responses() {
         return;
       }
 
+      // ====================================
+      // STEP 1: Archive data before deletion
+      // ====================================
+
+      // Fetch all sessions with college info
+      const { data: sessions, error: fetchSessionsError } = await supabase
+        .from("evaluation_sessions")
+        .select(
+          `
+          id,
+          session_token,
+          college_id,
+          started_at,
+          completed_at,
+          colleges (
+            id,
+            name,
+            code
+          )
+        `,
+        )
+        .eq("is_complete", true);
+
+      if (fetchSessionsError) throw fetchSessionsError;
+
+      // Fetch all responses with question and area info
+      const { data: responses, error: fetchResponsesError } =
+        await supabase.from("responses").select(`
+          id,
+          session_id,
+          question_id,
+          status,
+          comment,
+          questions (
+            id,
+            question_text,
+            parent_id,
+            question_order,
+            area_id,
+            areas (
+              id,
+              area_number,
+              name
+            )
+          )
+        `);
+
+      if (fetchResponsesError) throw fetchResponsesError;
+
+      // Only create history if there's data to archive
+      if (sessions && sessions.length > 0) {
+        // Auto-generate history name with timestamp
+        const now = new Date();
+        const historyName = `Evaluation Archive - ${now.toLocaleString(
+          "en-US",
+          {
+            month: "short",
+            day: "numeric",
+            year: "numeric",
+            hour: "numeric",
+            minute: "2-digit",
+            hour12: true,
+          },
+        )}`;
+
+        // Create history record
+        const { data: historyRecord, error: historyError } = await supabase
+          .from("evaluation_history")
+          .insert({
+            name: historyName,
+            archived_by: user.id,
+            total_sessions: sessions.length,
+            total_responses: responses?.length || 0,
+          })
+          .select()
+          .single();
+
+        if (historyError) throw historyError;
+
+        // Archive sessions with denormalized college info
+        const sessionInserts = sessions.map((session: any) => ({
+          history_id: historyRecord.id,
+          original_session_id: session.id,
+          college_id: session.college_id,
+          college_name: session.colleges?.name || null,
+          college_code: session.colleges?.code || null,
+          session_token: session.session_token,
+          started_at: session.started_at,
+          completed_at: session.completed_at,
+        }));
+
+        const { data: insertedSessions, error: sessionsInsertError } =
+          await supabase
+            .from("history_sessions")
+            .insert(sessionInserts)
+            .select();
+
+        if (sessionsInsertError) throw sessionsInsertError;
+
+        // Create a map of original session ID to new history session ID
+        const sessionIdMap = new Map<string, string>();
+        insertedSessions?.forEach((hs: any, index: number) => {
+          sessionIdMap.set(sessions[index].id, hs.id);
+        });
+
+        // Archive responses with denormalized question/area info
+        if (responses && responses.length > 0) {
+          const responseInserts = responses
+            .filter((r: any) => sessionIdMap.has(r.session_id))
+            .map((response: any) => ({
+              history_session_id: sessionIdMap.get(response.session_id),
+              original_response_id: response.id,
+              question_id: response.question_id,
+              question_text: response.questions?.question_text || null,
+              question_parent_id: response.questions?.parent_id || null,
+              question_order: response.questions?.question_order || null,
+              area_id: response.questions?.area_id || null,
+              area_number: response.questions?.areas?.area_number || null,
+              area_name: response.questions?.areas?.name || null,
+              status: response.status,
+              comment: response.comment,
+            }));
+
+          if (responseInserts.length > 0) {
+            const { error: responsesInsertError } = await supabase
+              .from("history_responses")
+              .insert(responseInserts);
+
+            if (responsesInsertError) throw responsesInsertError;
+          }
+        }
+      }
+
+      // ====================================
+      // STEP 2: Delete original data
+      // ====================================
+
       // Delete all responses first (foreign key constraint)
       const { error: responsesError } = await supabase
         .from("responses")
@@ -131,7 +268,12 @@ export default function Responses() {
 
       if (sessionsError) throw sessionsError;
 
-      showToast("All evaluation data has been reset", "success");
+      showToast(
+        sessions && sessions.length > 0
+          ? "Data archived to history and reset successfully"
+          : "All evaluation data has been reset",
+        "success",
+      );
       setShowResetModal(false);
       setResetPassword("");
       fetchComplianceData(); // Refresh data
@@ -186,7 +328,7 @@ export default function Responses() {
             status,
             comment
           )
-        `
+        `,
         )
         .eq("is_complete", true)
         .order("completed_at", { ascending: false }); // Most recent first
@@ -198,7 +340,7 @@ export default function Responses() {
         (college) => {
           // Get all sessions for this college (ordered by most recent first)
           const collegeSessions = (sessions || []).filter(
-            (s: SessionData) => s.college_id === college.id
+            (s: SessionData) => s.college_id === college.id,
           );
 
           // SSOT: For each area, use ONLY the most recent session's responses
@@ -222,7 +364,7 @@ export default function Responses() {
             session.responses.forEach((r) => {
               // Find which area this question belongs to
               const question = (questions || []).find(
-                (q: Question) => q.id === r.question_id
+                (q: Question) => q.id === r.question_id,
               );
               if (question) {
                 const areaResponses =
@@ -250,7 +392,7 @@ export default function Responses() {
           const areasData: AreaComplianceData[] = (areas || []).map((area) => {
             // Get questions for this area
             const areaQuestions = (questions || []).filter(
-              (q: Question) => q.area_id === area.id
+              (q: Question) => q.area_id === area.id,
             );
 
             // Track if area has questions
@@ -262,7 +404,7 @@ export default function Responses() {
             // Build hierarchical question tree with compliance
             const questionTree = buildQuestionTree(
               areaQuestions,
-              areaResponseMap
+              areaResponseMap,
             );
 
             // Determine displayState:
@@ -299,13 +441,13 @@ export default function Responses() {
           // Exclude: areas with NO questions AND areas where ALL questions are N/A
           // This ensures N/A areas don't penalize the overall percentage
           const areasWithValidCompliance = areasData.filter(
-            (a) => a.hasQuestions && a.displayState !== "all_na"
+            (a) => a.hasQuestions && a.displayState !== "all_na",
           );
           const overallCompliance =
             areasWithValidCompliance.length > 0
               ? areasWithValidCompliance.reduce(
                   (sum, a) => sum + (a.compliance ?? 0),
-                  0
+                  0,
                 ) / areasWithValidCompliance.length
               : null; // null if ALL areas have no questions or are all N/A
 
@@ -314,7 +456,7 @@ export default function Responses() {
             overallCompliance,
             areas: areasData,
           };
-        }
+        },
       );
 
       setCollegesData(processedData);
@@ -329,7 +471,7 @@ export default function Responses() {
   // Build hierarchical question tree with compliance data
   const buildQuestionTree = (
     questions: Question[],
-    responseMap: Map<string, ResponseData>
+    responseMap: Map<string, ResponseData>,
   ): QuestionComplianceNode[] => {
     // Create map for quick lookup
     const questionMap = new Map<string, Question>();
@@ -342,7 +484,7 @@ export default function Responses() {
     const buildNode = (
       question: Question,
       prefix: string,
-      index: number
+      index: number,
     ): QuestionComplianceNode => {
       const hierarchicalNumber = prefix
         ? `${prefix}.${index + 1}`
@@ -351,7 +493,7 @@ export default function Responses() {
         .filter((q) => q.parent_id === question.id)
         .sort((a, b) => a.question_order - b.question_order)
         .map((child, childIndex) =>
-          buildNode(child, hierarchicalNumber, childIndex)
+          buildNode(child, hierarchicalNumber, childIndex),
         );
 
       const response = responseMap.get(question.id);
@@ -422,7 +564,7 @@ export default function Responses() {
   const filteredColleges = collegesData.filter(
     (cd) =>
       cd.college.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      cd.college.code?.toLowerCase().includes(searchTerm.toLowerCase())
+      cd.college.code?.toLowerCase().includes(searchTerm.toLowerCase()),
   );
 
   if (isLoading) {

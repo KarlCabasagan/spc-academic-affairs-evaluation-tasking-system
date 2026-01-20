@@ -6,4 +6,5 @@ export { default as Questions } from "./Questions";
 export { default as Colleges } from "./Colleges";
 export { default as Responses } from "./Responses";
 export { default as Reports } from "./Reports";
+export { default as History } from "./History";
 export { default as PreviewCollege } from "./PreviewCollege";

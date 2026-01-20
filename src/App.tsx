@@ -16,6 +16,7 @@ import {
   Colleges,
   Responses,
   Reports,
+  History,
   PreviewCollege,
 } from "./pages/admin";
 
@@ -88,6 +89,7 @@ function App() {
             <Route path="colleges" element={<Colleges />} />
             <Route path="responses" element={<Responses />} />
             <Route path="reports" element={<Reports />} />
+            <Route path="history" element={<History />} />
             <Route path="preview-college" element={<PreviewCollege />} />
           </Route>
 

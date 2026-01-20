@@ -1,0 +1,26 @@
+{
+  "name": "SPC Academic Affairs Evaluation System",
+  "short_name": "SPC Eval",
+  "description": "Self-evaluation system for PACUCOA accreditation areas",
+  "start_url": "/public",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#800000",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/spc-logo.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/spc-logo.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["education", "productivity"],
+  "lang": "en"
+}
