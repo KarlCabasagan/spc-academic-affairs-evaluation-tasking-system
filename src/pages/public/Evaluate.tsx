@@ -308,6 +308,9 @@ export default function Evaluate() {
   const { areaId } = useParams<{ areaId: string }>();
   const {
     isOnline,
+    isLoading: isAreasLoading,
+    areas,
+    fetchAreas,
     fetchQuestions,
     getResponses,
     saveResponses,
@@ -322,35 +325,44 @@ export default function Evaluate() {
   const [questionTree, setQuestionTree] = useState<Question[]>([]);
   const [leafQuestions, setLeafQuestions] = useState<Question[]>([]);
   const [responses, setResponses] = useState<Map<string, StoredResponse>>(
-    new Map()
+    new Map(),
   );
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isCompleted, setIsCompleted] = useState(false);
 
-  // Fetch area info and questions
+  // Ensure areas are loaded (fetches from Supabase or cache)
   useEffect(() => {
-    if (areaId) {
+    fetchAreas();
+  }, [fetchAreas]);
+
+  // Load area data once areas are available
+  useEffect(() => {
+    if (areaId && !isAreasLoading) {
       loadAreaData();
     }
-  }, [areaId]);
+  }, [areaId, isAreasLoading, areas]);
 
   const loadAreaData = async () => {
     if (!areaId) return;
 
     setIsLoading(true);
     try {
-      // Fetch area info
-      const { data: areaData, error: areaError } = await supabase
-        .from("areas")
-        .select("*")
-        .eq("id", areaId)
-        .eq("is_active", true)
-        .single();
+      // Find area from cached areas (offline-safe)
+      let areaData = areas.find((a) => a.id === areaId);
 
-      if (areaError) throw areaError;
+      // If not in cache and online, try fetching fresh
+      if (!areaData && isOnline) {
+        const { data } = await supabase
+          .from("areas")
+          .select("*")
+          .eq("id", areaId)
+          .eq("is_active", true)
+          .single();
+        areaData = data;
+      }
+
       if (!areaData) throw new Error("Area not found");
-
       setArea(areaData);
 
       // Fetch questions (with offline support)
@@ -386,7 +398,7 @@ export default function Evaluate() {
       setIsCompleted(isAreaCompleted(areaId));
     } catch (err) {
       setError(
-        "Failed to load evaluation. The area may not exist or is unavailable."
+        "Failed to load evaluation. The area may not exist or is unavailable.",
       );
       console.error("Error fetching data:", err);
     } finally {
@@ -440,7 +452,7 @@ export default function Evaluate() {
 
   const getRequiredUnanswered = () => {
     return leafQuestions.filter(
-      (q) => q.is_required && !responses.get(q.id)?.answered
+      (q) => q.is_required && !responses.get(q.id)?.answered,
     );
   };
 
@@ -451,7 +463,7 @@ export default function Evaluate() {
     if (requiredUnanswered.length > 0) {
       showToast(
         `Please answer all required questions (${requiredUnanswered.length} remaining)`,
-        "error"
+        "error",
       );
       return;
     }
@@ -467,7 +479,7 @@ export default function Evaluate() {
       isCompleted
         ? "Responses updated successfully!"
         : "Area marked as complete!",
-      "success"
+      "success",
     );
 
     // Redirect back to area list
@@ -618,7 +630,7 @@ export default function Evaluate() {
             </span>
             <span className="text-sm text-gray-500">
               {Math.round(
-                (getAnsweredCount() / Math.max(leafQuestions.length, 1)) * 100
+                (getAnsweredCount() / Math.max(leafQuestions.length, 1)) * 100,
               )}
               %
             </span>

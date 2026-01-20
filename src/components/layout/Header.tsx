@@ -8,10 +8,27 @@ export default function Header() {
   const { user } = useAuth();
   const isAdmin = location.pathname.startsWith("/admin");
   const [hasAdmin, setHasAdmin] = useState<boolean | null>(null);
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+
+  // Monitor online status
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, []);
 
   useEffect(() => {
-    checkAdminExists();
-  }, []);
+    if (isOnline) {
+      checkAdminExists();
+    }
+  }, [isOnline]);
 
   const checkAdminExists = async () => {
     try {
@@ -70,21 +87,21 @@ export default function Header() {
 
           {/* Navigation */}
           <nav className="flex items-center gap-2">
-            {!isAdmin ? (
+            {!isAdmin && isOnline ? (
               <Link
                 to={adminButton.to}
                 className="px-4 py-2 text-sm font-medium rounded-lg bg-white/10 hover:bg-white/20 transition-colors"
               >
                 {adminButton.text}
               </Link>
-            ) : (
+            ) : isAdmin ? (
               <Link
                 to="/"
                 className="px-4 py-2 text-sm font-medium rounded-lg bg-white/10 hover:bg-white/20 transition-colors"
               >
                 Back to Home
               </Link>
-            )}
+            ) : null}
           </nav>
         </div>
       </div>

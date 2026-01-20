@@ -6,6 +6,7 @@ import type { Area, Question, ComplianceStatus } from "../lib/types";
 const STORAGE_KEYS = {
   AREAS_CACHE: "evaluation_areas_cache",
   QUESTIONS_CACHE: "evaluation_questions_cache",
+  QUESTIONS_LAST_SYNC: "evaluation_questions_last_sync",
   RESPONSES: "evaluation_responses",
   COMPLETED_AREAS: "evaluation_completed_areas",
 };
@@ -123,7 +124,7 @@ export function useOfflineEvaluation() {
           // Cache for offline use
           const cache = getFromStorage<QuestionsCache>(
             STORAGE_KEYS.QUESTIONS_CACHE,
-            {}
+            {},
           );
           cache[areaId] = questionsData;
           setToStorage(STORAGE_KEYS.QUESTIONS_CACHE, cache);
@@ -133,7 +134,7 @@ export function useOfflineEvaluation() {
           // Load from cache when offline
           const cache = getFromStorage<QuestionsCache>(
             STORAGE_KEYS.QUESTIONS_CACHE,
-            {}
+            {},
           );
           return cache[areaId] || [];
         }
@@ -142,19 +143,70 @@ export function useOfflineEvaluation() {
         // Fall back to cache on error
         const cache = getFromStorage<QuestionsCache>(
           STORAGE_KEYS.QUESTIONS_CACHE,
-          {}
+          {},
         );
         return cache[areaId] || [];
       }
     },
-    [isOnline]
+    [isOnline],
   );
+
+  // Prefetch ALL questions from ALL areas (for offline support)
+  const prefetchAllQuestions = useCallback(async () => {
+    if (!isOnline) return;
+
+    try {
+      // Fetch all active questions at once
+      const { data: allQuestions, error } = await supabase
+        .from("questions")
+        .select("*")
+        .eq("is_active", true)
+        .order("question_order", { ascending: true });
+
+      if (error) throw error;
+
+      // Group by area_id
+      const cache: QuestionsCache = {};
+      (allQuestions || []).forEach((q: Question) => {
+        if (!cache[q.area_id]) {
+          cache[q.area_id] = [];
+        }
+        cache[q.area_id].push(q);
+      });
+
+      // Save to localStorage
+      setToStorage(STORAGE_KEYS.QUESTIONS_CACHE, cache);
+      setToStorage(STORAGE_KEYS.QUESTIONS_LAST_SYNC, Date.now());
+
+      console.log(
+        `Prefetched ${allQuestions?.length || 0} questions for offline use`,
+      );
+    } catch (error) {
+      console.error("Error prefetching questions:", error);
+    }
+  }, [isOnline]);
+
+  // Sync questions cache when coming back online
+  useEffect(() => {
+    if (isOnline) {
+      // Check if we need to sync (sync every 5 minutes max)
+      const lastSync = getFromStorage<number>(
+        STORAGE_KEYS.QUESTIONS_LAST_SYNC,
+        0,
+      );
+      const fiveMinutes = 5 * 60 * 1000;
+
+      if (Date.now() - lastSync > fiveMinutes) {
+        prefetchAllQuestions();
+      }
+    }
+  }, [isOnline, prefetchAllQuestions]);
 
   // Get responses for a specific area
   const getResponses = useCallback((areaId: string): AreaResponses => {
     const allResponses = getFromStorage<AllResponses>(
       STORAGE_KEYS.RESPONSES,
-      {}
+      {},
     );
     return allResponses[areaId] || {};
   }, []);
@@ -164,12 +216,12 @@ export function useOfflineEvaluation() {
     (areaId: string, responses: AreaResponses) => {
       const allResponses = getFromStorage<AllResponses>(
         STORAGE_KEYS.RESPONSES,
-        {}
+        {},
       );
       allResponses[areaId] = responses;
       setToStorage(STORAGE_KEYS.RESPONSES, allResponses);
     },
-    []
+    [],
   );
 
   // Mark area as completed
@@ -195,14 +247,14 @@ export function useOfflineEvaluation() {
     (areaId: string): boolean => {
       return completedAreas.includes(areaId);
     },
-    [completedAreas]
+    [completedAreas],
   );
 
   // Clear responses for a specific area
   const clearAreaResponses = useCallback((areaId: string) => {
     const allResponses = getFromStorage<AllResponses>(
       STORAGE_KEYS.RESPONSES,
-      {}
+      {},
     );
     delete allResponses[areaId];
     setToStorage(STORAGE_KEYS.RESPONSES, allResponses);
@@ -231,17 +283,17 @@ export function useOfflineEvaluation() {
     (areaResponses: AreaResponses): number | null => {
       const responses = Object.values(areaResponses).filter((r) => r.answered);
       const validResponses = responses.filter(
-        (r) => r.status !== "not_applicable"
+        (r) => r.status !== "not_applicable",
       );
 
       if (validResponses.length === 0) return null;
 
       const complied = validResponses.filter(
-        (r) => r.status === "complied"
+        (r) => r.status === "complied",
       ).length;
       return (complied / validResponses.length) * 100;
     },
-    []
+    [],
   );
 
   // Calculate overall compliance across all areas
@@ -269,6 +321,7 @@ export function useOfflineEvaluation() {
     completedAreas,
     fetchAreas,
     fetchQuestions,
+    prefetchAllQuestions,
     getResponses,
     saveResponses,
     markAreaComplete,
