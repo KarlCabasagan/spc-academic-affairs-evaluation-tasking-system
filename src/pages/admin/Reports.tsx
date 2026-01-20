@@ -8,6 +8,31 @@ interface QuestionData {
   id: string;
   area_id: string;
   parent_id: string | null;
+  question_text: string;
+  question_order: number;
+}
+
+// Response data for detailed export
+interface DetailedResponse {
+  question_id: string;
+  status: ComplianceStatus;
+  comment: string | null;
+}
+
+interface CollegeDetailedData {
+  college: College;
+  areas: {
+    area: Area;
+    questions: QuestionData[];
+    responses: Map<string, DetailedResponse>;
+  }[];
+}
+
+// Basic question data for matrix (without text)
+interface BasicQuestionData {
+  id: string;
+  area_id: string;
+  parent_id: string | null;
 }
 
 // Display state for a cell - matches Responses.tsx logic
@@ -38,6 +63,11 @@ export default function Reports() {
   >({});
   const [isLoading, setIsLoading] = useState(true);
 
+  // Detailed data for export
+  const [collegeDetailedData, setCollegeDetailedData] = useState<
+    CollegeDetailedData[]
+  >([]);
+
   useEffect(() => {
     fetchData();
 
@@ -49,7 +79,7 @@ export default function Reports() {
         { event: "*", schema: "public", table: "evaluation_sessions" },
         () => {
           fetchData();
-        }
+        },
       )
       .subscribe();
 
@@ -60,7 +90,7 @@ export default function Reports() {
         { event: "*", schema: "public", table: "responses" },
         () => {
           fetchData();
-        }
+        },
       )
       .subscribe();
 
@@ -92,15 +122,16 @@ export default function Reports() {
       if (collegesError) throw collegesError;
       setColleges(collegesData || []);
 
-      // Fetch all questions (to map responses to areas and identify leaf nodes)
-      const { data: questionsData, error: questionsError } = await supabase
+      // Fetch all questions with text and order for detailed export
+      const { data: questionsDataFull, error: questionsError } = await supabase
         .from("questions")
-        .select("id, area_id, parent_id")
-        .eq("is_active", true);
+        .select("id, area_id, parent_id, question_text, question_order")
+        .eq("is_active", true)
+        .order("question_order", { ascending: true });
 
       if (questionsError) throw questionsError;
 
-      // Fetch all completed sessions with responses and completed_at for SSOT
+      // Fetch all completed sessions with responses including comments for SSOT
       const { data: sessionsData, error: sessionsError } = await supabase
         .from("evaluation_sessions")
         .select(
@@ -110,21 +141,36 @@ export default function Reports() {
           completed_at,
           responses (
             question_id,
-            status
+            status,
+            comment
           )
-        `
+        `,
         )
         .eq("is_complete", true)
         .order("completed_at", { ascending: false }); // Most recent first
 
       if (sessionsError) throw sessionsError;
 
-      // Build matrix with SSOT
+      // Build matrix with SSOT (basic question data for matrix)
+      const basicQuestionsData = (questionsDataFull || []).map((q) => ({
+        id: q.id,
+        area_id: q.area_id,
+        parent_id: q.parent_id,
+      }));
+
       buildMatrixWithSSOT(
         areasData || [],
         collegesData || [],
-        questionsData || [],
-        sessionsData || []
+        basicQuestionsData,
+        sessionsData || [],
+      );
+
+      // Build college detailed data for export
+      buildCollegeDetailedData(
+        areasData || [],
+        collegesData || [],
+        questionsDataFull || [],
+        sessionsData || [],
       );
     } catch (error) {
       console.error("Error fetching data:", error);
@@ -144,8 +190,8 @@ export default function Reports() {
   const buildMatrixWithSSOT = (
     areasData: Area[],
     collegesData: College[],
-    questionsData: QuestionData[],
-    sessionsData: SessionWithResponses[]
+    questionsData: BasicQuestionData[],
+    sessionsData: SessionWithResponses[],
   ) => {
     // Create question -> area mapping
     const questionAreaMap = new Map<string, string>();
@@ -155,10 +201,10 @@ export default function Reports() {
 
     // Identify leaf questions (questions that don't have children)
     const parentIds = new Set(
-      questionsData.map((q) => q.parent_id).filter(Boolean)
+      questionsData.map((q) => q.parent_id).filter(Boolean),
     );
     const leafQuestionIds = new Set(
-      questionsData.filter((q) => !parentIds.has(q.id)).map((q) => q.id)
+      questionsData.filter((q) => !parentIds.has(q.id)).map((q) => q.id),
     );
 
     // Count leaf questions per area
@@ -331,6 +377,115 @@ export default function Reports() {
     setCollegeTotals(totals);
   };
 
+  // Build detailed data structure for per-college export sheets
+  interface SessionWithDetailedResponses {
+    id: string;
+    college_id: string | null;
+    completed_at: string | null;
+    responses:
+      | {
+          question_id: string;
+          status: ComplianceStatus;
+          comment: string | null;
+        }[]
+      | null;
+  }
+
+  const buildCollegeDetailedData = (
+    areasData: Area[],
+    collegesData: College[],
+    questionsDataFull: QuestionData[],
+    sessionsData: SessionWithDetailedResponses[],
+  ) => {
+    // Group questions by area
+    const questionsByArea = new Map<string, QuestionData[]>();
+    questionsDataFull.forEach((q) => {
+      const existing = questionsByArea.get(q.area_id) || [];
+      existing.push(q);
+      questionsByArea.set(q.area_id, existing);
+    });
+
+    // SSOT: For each college, use the most recent session's responses per area
+    const processedCollegeAreas = new Map<string, Set<string>>();
+
+    const collegeResponses = new Map<
+      string,
+      Map<string, Map<string, DetailedResponse>>
+    >();
+    // collegeId -> areaId -> questionId -> response
+
+    sessionsData.forEach((session) => {
+      if (!session.college_id || !session.responses) return;
+
+      let processedAreas = processedCollegeAreas.get(session.college_id);
+      if (!processedAreas) {
+        processedAreas = new Set();
+        processedCollegeAreas.set(session.college_id, processedAreas);
+      }
+
+      // Determine which areas this session covers
+      const areasInSession = new Set<string>();
+      session.responses.forEach((r) => {
+        const question = questionsDataFull.find((q) => q.id === r.question_id);
+        if (question) {
+          areasInSession.add(question.area_id);
+        }
+      });
+
+      // For each area in this session, if not yet processed for this college, use these responses
+      areasInSession.forEach((areaId) => {
+        if (!processedAreas!.has(areaId)) {
+          processedAreas!.add(areaId);
+
+          // Initialize maps if needed
+          if (!collegeResponses.has(session.college_id!)) {
+            collegeResponses.set(session.college_id!, new Map());
+          }
+          const collegeAreaMap = collegeResponses.get(session.college_id!)!;
+          if (!collegeAreaMap.has(areaId)) {
+            collegeAreaMap.set(areaId, new Map());
+          }
+          const responseMap = collegeAreaMap.get(areaId)!;
+
+          // Add responses for this area
+          session.responses!.forEach((r) => {
+            const question = questionsDataFull.find(
+              (q) => q.id === r.question_id,
+            );
+            if (question && question.area_id === areaId) {
+              responseMap.set(r.question_id, {
+                question_id: r.question_id,
+                status: r.status,
+                comment: r.comment,
+              });
+            }
+          });
+        }
+      });
+    });
+
+    // Build the final CollegeDetailedData structure
+    const detailedData: CollegeDetailedData[] = collegesData.map((college) => {
+      const collegeAreaResponses =
+        collegeResponses.get(college.id) || new Map();
+
+      const areasDataForCollege = areasData.map((area) => ({
+        area,
+        questions: questionsByArea.get(area.id) || [],
+        responses:
+          collegeAreaResponses.get(area.id) ||
+          new Map<string, DetailedResponse>(),
+      }));
+
+      return {
+        college,
+        areas: areasDataForCollege,
+      };
+    });
+
+    setCollegeDetailedData(detailedData);
+  };
+
   const getComplianceColor = (compliance: number | null): string => {
     if (compliance === null) return "text-gray-400";
     if (compliance >= 80) return "text-emerald-600";
@@ -368,10 +523,14 @@ export default function Reports() {
       return;
     }
 
-    // Build header row
+    // Create workbook
+    const wb = XLSX.utils.book_new();
+
+    // ========================================
+    // SHEET 1: Compliance Matrix
+    // ========================================
     const headers = ["Area", ...colleges.map((c) => c.code || c.name)];
 
-    // Build data rows
     const rows = matrixData.map((row) => {
       const dataRow: (string | number)[] = [
         `Area ${row.area.area_number}: ${row.area.name}`,
@@ -388,23 +547,174 @@ export default function Reports() {
     colleges.forEach((college) => {
       const total = collegeTotals[college.id];
       totalsRow.push(
-        total?.compliance !== null ? `${total.compliance.toFixed(1)}%` : "N/A"
+        total?.compliance !== null ? `${total.compliance.toFixed(1)}%` : "N/A",
       );
     });
     rows.push(totalsRow);
 
-    // Create workbook
-    const wb = XLSX.utils.book_new();
-    const ws = XLSX.utils.aoa_to_sheet([headers, ...rows]);
+    const wsMatrix = XLSX.utils.aoa_to_sheet([headers, ...rows]);
+    wsMatrix["!cols"] = [{ wch: 40 }, ...colleges.map(() => ({ wch: 15 }))];
+    XLSX.utils.book_append_sheet(wb, wsMatrix, "Compliance Matrix");
 
-    ws["!cols"] = [{ wch: 40 }, ...colleges.map(() => ({ wch: 15 }))];
+    // ========================================
+    // SHEETS 2+: Per-College Detail Sheets
+    // ========================================
 
-    XLSX.utils.book_append_sheet(wb, ws, "Compliance Matrix");
+    // Helper to flatten tree with numbers
+    const flattenTree = (
+      questions: QuestionData[],
+    ): {
+      question: QuestionData;
+      hierarchicalNumber: string;
+      isLeaf: boolean;
+    }[] => {
+      const questionMap = new Map<
+        string,
+        QuestionData & { children?: QuestionData[] }
+      >();
+      const roots: (QuestionData & { children?: QuestionData[] })[] = [];
+
+      questions.forEach((q) => {
+        questionMap.set(q.id, { ...q, children: [] });
+      });
+
+      questions.forEach((q) => {
+        const question = questionMap.get(q.id)!;
+        if (q.parent_id && questionMap.has(q.parent_id)) {
+          const parent = questionMap.get(q.parent_id)!;
+          parent.children!.push(question);
+        } else {
+          roots.push(question);
+        }
+      });
+
+      // Sort
+      const sortRecursive = (
+        items: (QuestionData & { children?: QuestionData[] })[],
+      ) => {
+        items.sort((a, b) => a.question_order - b.question_order);
+        items.forEach((item) => {
+          if (item.children && item.children.length > 0) {
+            sortRecursive(item.children);
+          }
+        });
+      };
+      sortRecursive(roots);
+
+      // Flatten
+      const result: {
+        question: QuestionData;
+        hierarchicalNumber: string;
+        isLeaf: boolean;
+      }[] = [];
+      const flatten = (
+        items: (QuestionData & { children?: QuestionData[] })[],
+        prefix: string = "",
+      ) => {
+        items.forEach((item, index) => {
+          const num = prefix ? `${prefix}.${index + 1}` : `${index + 1}`;
+          const isLeaf = !item.children || item.children.length === 0;
+          result.push({ question: item, hierarchicalNumber: num, isLeaf });
+          if (item.children && item.children.length > 0) {
+            flatten(item.children, num);
+          }
+        });
+      };
+      flatten(roots);
+      return result;
+    };
+
+    collegeDetailedData.forEach((collegeData) => {
+      const detailRows: (string | number)[][] = [];
+      const detailHeaders = ["Area", "Question", "Response", "Comment"];
+
+      collegeData.areas.forEach((areaData, areaIndex) => {
+        if (areaData.questions.length === 0) return;
+
+        const flatQuestions = flattenTree(areaData.questions);
+
+        // Track complied/not-complied for compliance calc
+        let complied = 0;
+        let notComplied = 0;
+
+        flatQuestions.forEach((item, qIndex) => {
+          const response = areaData.responses.get(item.question.id);
+
+          // Only leaf questions have actual responses
+          let statusText = "";
+          if (item.isLeaf) {
+            if (!response) {
+              statusText = "No Response";
+            } else if (response.status === "complied") {
+              statusText = "Complied";
+              complied++;
+            } else if (response.status === "not_complied") {
+              statusText = "Not Complied";
+              notComplied++;
+            } else {
+              statusText = "N/A";
+            }
+          }
+
+          // Area name only on first question of area
+          const areaName =
+            qIndex === 0
+              ? `Area ${areaData.area.area_number}: ${areaData.area.name}`
+              : "";
+
+          detailRows.push([
+            areaName,
+            `${item.hierarchicalNumber} ${item.question.question_text}`,
+            statusText,
+            item.isLeaf ? response?.comment || "" : "",
+          ]);
+        });
+
+        // Add area compliance row
+        const validResponses = complied + notComplied;
+        const areaCompliance =
+          validResponses > 0
+            ? ((complied / validResponses) * 100).toFixed(1) + "%"
+            : "N/A";
+        detailRows.push([
+          `Area ${areaData.area.area_number} Compliance`,
+          "",
+          areaCompliance,
+          "",
+        ]);
+
+        // Blank row between areas
+        if (areaIndex < collegeData.areas.length - 1) {
+          detailRows.push(["", "", "", ""]);
+        }
+      });
+
+      // Only create sheet if there's data
+      if (detailRows.length > 0) {
+        const wsDetail = XLSX.utils.aoa_to_sheet([
+          detailHeaders,
+          ...detailRows,
+        ]);
+        wsDetail["!cols"] = [
+          { wch: 35 },
+          { wch: 60 },
+          { wch: 15 },
+          { wch: 40 },
+        ];
+
+        // Sheet name max 31 chars
+        const sheetName = (
+          collegeData.college.code || collegeData.college.name
+        ).substring(0, 31);
+        XLSX.utils.book_append_sheet(wb, wsDetail, sheetName);
+      }
+    });
+
     XLSX.writeFile(
       wb,
-      `compliance_matrix_${new Date().toISOString().split("T")[0]}.xlsx`
+      `compliance_report_${new Date().toISOString().split("T")[0]}.xlsx`,
     );
-    showToast("Matrix exported successfully", "success");
+    showToast("Report exported successfully", "success");
   };
 
   if (isLoading) {
@@ -466,7 +776,7 @@ export default function Reports() {
             <p className="text-3xl font-bold text-maroon-800">
               {Object.values(collegeTotals).reduce(
                 (sum, t) => sum + t.total,
-                0
+                0,
               )}
             </p>
             <p className="text-sm text-gray-500">Total Responses</p>

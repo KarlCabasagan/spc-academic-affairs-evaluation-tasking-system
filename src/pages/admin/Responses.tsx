@@ -55,8 +55,6 @@ export default function Responses() {
 
   // Reset data modal state
   const [showResetModal, setShowResetModal] = useState(false);
-  const [resetPassword, setResetPassword] = useState("");
-  const [isResetting, setIsResetting] = useState(false);
 
   useEffect(() => {
     fetchComplianceData();
@@ -91,28 +89,21 @@ export default function Responses() {
   }, []);
 
   // Handle data reset with password verification
-  const handleResetData = async () => {
+  const handleResetData = async (password: string): Promise<boolean> => {
     if (!user?.email) {
       showToast("User not authenticated", "error");
-      return;
+      return false;
     }
-
-    if (!resetPassword.trim()) {
-      showToast("Please enter your password", "error");
-      return;
-    }
-
-    setIsResetting(true);
     try {
       // Verify admin password using sign in
       const { error: authError } = await supabase.auth.signInWithPassword({
         email: user.email,
-        password: resetPassword,
+        password: password,
       });
 
       if (authError) {
         showToast("Invalid password. Please try again.", "error");
-        return;
+        return false;
       }
 
       // ====================================
@@ -275,13 +266,12 @@ export default function Responses() {
         "success",
       );
       setShowResetModal(false);
-      setResetPassword("");
       fetchComplianceData(); // Refresh data
+      return true;
     } catch (error) {
       console.error("Error resetting data:", error);
       showToast("Failed to reset data. Please try again.", "error");
-    } finally {
-      setIsResetting(false);
+      return false;
     }
   };
 
@@ -738,110 +728,141 @@ export default function Responses() {
       )}
 
       {/* Reset Data Confirmation Modal */}
-      <Modal
+      <ResetDataModal
         isOpen={showResetModal}
-        onClose={() => {
-          setShowResetModal(false);
-          setResetPassword("");
-        }}
-        title="Reset All Evaluation Data?"
-        size="md"
-      >
-        <div className="space-y-4">
-          <div className="bg-red-50 border border-red-200 rounded-lg p-4">
-            <div className="flex items-start gap-3">
-              <svg
-                className="w-5 h-5 text-red-600 shrink-0 mt-0.5"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
-                />
-              </svg>
-              <div>
-                <h4 className="font-semibold text-red-800">Danger Zone</h4>
-                <p className="text-sm text-red-700 mt-1">
-                  This will <strong>permanently delete</strong>:
-                </p>
-                <ul className="text-sm text-red-700 mt-2 list-disc list-inside">
-                  <li>All evaluation sessions</li>
-                  <li>All responses from all colleges</li>
-                </ul>
-                <p className="text-sm text-red-700 mt-2 font-medium">
-                  This action CANNOT be undone.
-                </p>
-              </div>
-            </div>
-          </div>
+        onClose={() => setShowResetModal(false)}
+        onReset={handleResetData}
+      />
+    </div>
+  );
+}
 
-          {/* Export Reminder */}
-          <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
-            <div className="flex items-start gap-3">
-              <svg
-                className="w-5 h-5 text-amber-600 shrink-0 mt-0.5"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-                />
-              </svg>
-              <div>
-                <h4 className="font-semibold text-amber-800">
-                  Before You Continue
-                </h4>
-                <p className="text-sm text-amber-700 mt-1">
-                  Make sure to <strong>export the compliance reports</strong>{" "}
-                  from the <span className="underline">Reports page</span>{" "}
-                  before resetting all data.
-                </p>
-              </div>
-            </div>
-          </div>
+// Extracted modal component to prevent re-renders when typing password
+interface ResetDataModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  onReset: (password: string) => Promise<boolean>;
+}
 
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Enter your password to confirm
-            </label>
-            <input
-              type="password"
-              value={resetPassword}
-              onChange={(e) => setResetPassword(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-red-500"
-              placeholder="Your admin password"
-            />
-          </div>
+function ResetDataModal({ isOpen, onClose, onReset }: ResetDataModalProps) {
+  const [password, setPassword] = useState("");
+  const [isResetting, setIsResetting] = useState(false);
 
-          <div className="flex justify-end gap-3 pt-2">
-            <Button
-              variant="secondary"
-              onClick={() => {
-                setShowResetModal(false);
-                setResetPassword("");
-              }}
+  const handleSubmit = async () => {
+    if (!password.trim()) {
+      showToast("Please enter your password", "error");
+      return;
+    }
+
+    setIsResetting(true);
+    const success = await onReset(password);
+    setIsResetting(false);
+
+    if (success) {
+      setPassword("");
+    }
+  };
+
+  const handleClose = () => {
+    setPassword("");
+    onClose();
+  };
+
+  return (
+    <Modal
+      isOpen={isOpen}
+      onClose={handleClose}
+      title="Reset All Evaluation Data?"
+      size="md"
+    >
+      <div className="space-y-4">
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+          <div className="flex items-start gap-3">
+            <svg
+              className="w-5 h-5 text-red-600 shrink-0 mt-0.5"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
             >
-              Cancel
-            </Button>
-            <Button
-              variant="danger"
-              onClick={handleResetData}
-              isLoading={isResetting}
-              disabled={!resetPassword.trim()}
-            >
-              Reset All Data
-            </Button>
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
+              />
+            </svg>
+            <div>
+              <h4 className="font-semibold text-red-800">Danger Zone</h4>
+              <p className="text-sm text-red-700 mt-1">
+                This will <strong>permanently delete</strong>:
+              </p>
+              <ul className="text-sm text-red-700 mt-2 list-disc list-inside">
+                <li>All evaluation sessions</li>
+                <li>All responses from all colleges</li>
+              </ul>
+              <p className="text-sm text-red-700 mt-2 font-medium">
+                This action CANNOT be undone.
+              </p>
+            </div>
           </div>
         </div>
-      </Modal>
-    </div>
+
+        {/* Export Reminder */}
+        <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+          <div className="flex items-start gap-3">
+            <svg
+              className="w-5 h-5 text-amber-600 shrink-0 mt-0.5"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+              />
+            </svg>
+            <div>
+              <h4 className="font-semibold text-amber-800">
+                Before You Continue
+              </h4>
+              <p className="text-sm text-amber-700 mt-1">
+                Make sure to <strong>export the compliance reports</strong> from
+                the <span className="underline">Reports page</span> before
+                resetting all data.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">
+            Enter your password to confirm
+          </label>
+          <input
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-red-500"
+            placeholder="Your admin password"
+          />
+        </div>
+
+        <div className="flex justify-end gap-3 pt-2">
+          <Button variant="secondary" onClick={handleClose}>
+            Cancel
+          </Button>
+          <Button
+            variant="danger"
+            onClick={handleSubmit}
+            isLoading={isResetting}
+            disabled={!password.trim()}
+          >
+            Reset All Data
+          </Button>
+        </div>
+      </div>
+    </Modal>
   );
 }

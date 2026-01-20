@@ -51,7 +51,7 @@ export default function AdminLayout() {
           {/* Right side actions */}
           <div className="flex items-center gap-4">
             <a
-              href="/"
+              href="/public"
               target="_blank"
               rel="noopener noreferrer"
               className="text-sm text-gray-500 hover:text-maroon-800 flex items-center gap-1"
