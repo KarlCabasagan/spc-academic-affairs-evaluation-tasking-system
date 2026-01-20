@@ -375,6 +375,14 @@ export default function Landing() {
         </div>
       </section>
 
+      {/* Footer Credit */}
+      <footer className="py-6 text-center">
+        <p className="text-sm text-gray-500">
+          Made with <span className="text-red-500">❤</span> by John Karl Harley
+          Cabasagan & Jeoff Montebon
+        </p>
+      </footer>
+
       {/* Clear All Confirmation */}
       <ConfirmDialog
         isOpen={showClearConfirm}

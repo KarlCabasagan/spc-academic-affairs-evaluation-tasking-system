@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { supabase } from "../../lib/supabase";
+import * as XLSX from "xlsx";
 import type { ComplianceStatus } from "../../lib/types";
 import {
   Button,
@@ -423,6 +424,204 @@ export default function History() {
     });
   };
 
+  // Export history record to Excel (matching Reports page format)
+  const exportHistoryToExcel = (record: HistoryRecord) => {
+    const data = expandedData.get(record.id);
+    if (!data || data.colleges.length === 0) {
+      showToast("Please expand the record first to load data", "error");
+      return;
+    }
+
+    const wb = XLSX.utils.book_new();
+
+    // ========================================
+    // SHEET 1: Compliance Matrix
+    // ========================================
+
+    // Get all unique areas across all colleges
+    const allAreas = new Map<
+      string,
+      { areaNumber: number; areaName: string }
+    >();
+    data.colleges.forEach((college) => {
+      college.areas.forEach((area) => {
+        if (!allAreas.has(area.areaId)) {
+          allAreas.set(area.areaId, {
+            areaNumber: area.areaNumber,
+            areaName: area.areaName,
+          });
+        }
+      });
+    });
+
+    // Sort areas by areaNumber
+    const sortedAreas = Array.from(allAreas.entries()).sort(
+      (a, b) => a[1].areaNumber - b[1].areaNumber,
+    );
+
+    // Build matrix headers
+    const matrixHeaders = [
+      "Area",
+      ...data.colleges.map((c) => c.collegeCode || c.collegeName),
+    ];
+
+    // Build matrix rows
+    const matrixRows: (string | number)[][] = sortedAreas.map(
+      ([areaId, areaInfo]) => {
+        const row: (string | number)[] = [
+          `Area ${areaInfo.areaNumber}: ${areaInfo.areaName}`,
+        ];
+        data.colleges.forEach((college) => {
+          const area = college.areas.find((a) => a.areaId === areaId);
+          if (!area) {
+            row.push("—");
+          } else if (area.displayState === "no_questions") {
+            row.push("—");
+          } else if (area.displayState === "all_na") {
+            row.push("N/A");
+          } else {
+            row.push(
+              area.compliance !== null
+                ? `${area.compliance.toFixed(1)}%`
+                : "0.0%",
+            );
+          }
+        });
+        return row;
+      },
+    );
+
+    // Add totals row
+    const totalsRow: (string | number)[] = ["Total Compliance"];
+    data.colleges.forEach((college) => {
+      totalsRow.push(
+        college.overallCompliance !== null
+          ? `${college.overallCompliance.toFixed(1)}%`
+          : "N/A",
+      );
+    });
+    matrixRows.push(totalsRow);
+
+    const wsMatrix = XLSX.utils.aoa_to_sheet([matrixHeaders, ...matrixRows]);
+    wsMatrix["!cols"] = [
+      { wch: 40 },
+      ...data.colleges.map(() => ({ wch: 15 })),
+    ];
+    XLSX.utils.book_append_sheet(wb, wsMatrix, "Compliance Matrix");
+
+    // ========================================
+    // SHEETS 2+: Per-College Detail Sheets
+    // ========================================
+
+    // Helper to flatten question tree with hierarchical numbers
+    const flattenQuestionTree = (
+      nodes: QuestionComplianceNode[],
+    ): { node: QuestionComplianceNode; isLeaf: boolean }[] => {
+      const result: { node: QuestionComplianceNode; isLeaf: boolean }[] = [];
+      const traverse = (items: QuestionComplianceNode[]) => {
+        items.forEach((item) => {
+          const isLeaf = !item.children || item.children.length === 0;
+          result.push({ node: item, isLeaf });
+          if (item.children && item.children.length > 0) {
+            traverse(item.children);
+          }
+        });
+      };
+      traverse(nodes);
+      return result;
+    };
+
+    data.colleges.forEach((college) => {
+      const detailRows: (string | number)[][] = [];
+      const detailHeaders = ["Area", "Question", "Response", "Comment"];
+
+      college.areas.forEach((areaData, areaIndex) => {
+        if (areaData.questions.length === 0) return;
+
+        const flatQuestions = flattenQuestionTree(areaData.questions);
+
+        // Track compliance for area total
+        let complied = 0;
+        let notComplied = 0;
+
+        flatQuestions.forEach((item, qIndex) => {
+          let statusText = "";
+          if (item.isLeaf && item.node.response) {
+            if (item.node.response.status === "complied") {
+              statusText = "Complied";
+              complied++;
+            } else if (item.node.response.status === "not_complied") {
+              statusText = "Not Complied";
+              notComplied++;
+            } else if (item.node.response.status === "not_applicable") {
+              statusText = "N/A";
+            } else {
+              statusText = "No Response";
+            }
+          }
+
+          // Area name only on first question
+          const areaName =
+            qIndex === 0
+              ? `Area ${areaData.areaNumber}: ${areaData.areaName}`
+              : "";
+
+          detailRows.push([
+            areaName,
+            `${item.node.hierarchicalNumber} ${item.node.questionText}`,
+            statusText,
+            item.isLeaf ? item.node.response?.comment || "" : "",
+          ]);
+        });
+
+        // Add area compliance row
+        const validResponses = complied + notComplied;
+        const areaCompliance =
+          validResponses > 0
+            ? ((complied / validResponses) * 100).toFixed(1) + "%"
+            : "N/A";
+        detailRows.push([
+          `Area ${areaData.areaNumber} Compliance`,
+          "",
+          areaCompliance,
+          "",
+        ]);
+
+        // Blank row between areas
+        if (areaIndex < college.areas.length - 1) {
+          detailRows.push(["", "", "", ""]);
+        }
+      });
+
+      // Only create sheet if there's data
+      if (detailRows.length > 0) {
+        const wsDetail = XLSX.utils.aoa_to_sheet([
+          detailHeaders,
+          ...detailRows,
+        ]);
+        wsDetail["!cols"] = [
+          { wch: 35 },
+          { wch: 60 },
+          { wch: 15 },
+          { wch: 40 },
+        ];
+
+        // Sheet name max 31 chars
+        const sheetName = (
+          college.collegeCode || college.collegeName
+        ).substring(0, 31);
+        XLSX.utils.book_append_sheet(wb, wsDetail, sheetName);
+      }
+    });
+
+    // Export
+    const safeName = record.name
+      .replace(/[^a-zA-Z0-9\s-]/g, "")
+      .substring(0, 50);
+    XLSX.writeFile(wb, `${safeName}.xlsx`);
+    showToast("History exported successfully", "success");
+  };
+
   // Filter records by search term
   const filteredRecords = historyRecords.filter((r) =>
     r.name.toLowerCase().includes(searchTerm.toLowerCase()),
@@ -501,6 +700,7 @@ export default function History() {
               onExpand={() => loadHistoryDetails(record.id)}
               onEdit={() => openEditModal(record)}
               onDelete={() => openDeleteModal(record)}
+              onExport={() => exportHistoryToExcel(record)}
               formatDate={formatDate}
             />
           ))}
@@ -612,6 +812,7 @@ interface HistoryRecordAccordionProps {
   onExpand: () => void;
   onEdit: () => void;
   onDelete: () => void;
+  onExport: () => void;
   formatDate: (date: string) => string;
 }
 
@@ -622,6 +823,7 @@ function HistoryRecordAccordion({
   onExpand,
   onEdit,
   onDelete,
+  onExport,
   formatDate,
 }: HistoryRecordAccordionProps) {
   const [isExpanded, setIsExpanded] = useState(false);
@@ -689,6 +891,25 @@ function HistoryRecordAccordion({
 
         {/* Action Buttons */}
         <div className="flex items-center gap-2 shrink-0">
+          <button
+            onClick={onExport}
+            className="p-2 text-gray-500 hover:text-green-600 hover:bg-green-50 rounded-lg transition-colors"
+            title="Export to Excel"
+          >
+            <svg
+              className="w-4 h-4"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+              />
+            </svg>
+          </button>
           <button
             onClick={onEdit}
             className="p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-colors"

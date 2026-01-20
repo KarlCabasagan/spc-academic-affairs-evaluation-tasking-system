@@ -60,10 +60,10 @@ export default function Header() {
             />
             <div className="hidden sm:block">
               <h1 className="text-lg font-semibold leading-tight">
-                Academic Affairs
+                Office of the Vice President for Academic Affairs
               </h1>
               <p className="text-xs text-maroon-200">
-                Evaluation Tasking System
+                Unit: Accreditation and Quality Assurance Department
               </p>
             </div>
           </Link>
