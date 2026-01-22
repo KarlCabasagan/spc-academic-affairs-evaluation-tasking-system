@@ -1,12 +1,50 @@
-import { useState } from "react";
-import { Outlet, Navigate, Link, useLocation } from "react-router-dom";
+import { useState, useEffect, useRef } from "react";
+import {
+  Outlet,
+  Navigate,
+  Link,
+  useLocation,
+  useNavigate,
+} from "react-router-dom";
 import { useAuth } from "../../context/AuthContext";
 import { Loading } from "../ui";
 
 export default function CollegeLayout() {
-  const { user, userRole, college, isLoading, signOut } = useAuth();
+  const { user, userRole, college, isLoading, isOnline, signOut } = useAuth();
   const location = useLocation();
+  const navigate = useNavigate();
   const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const wasAuthenticatedRef = useRef(false);
+
+  // Track if user was authenticated before going offline
+  useEffect(() => {
+    if (user && userRole === "college") {
+      wasAuthenticatedRef.current = true;
+    }
+  }, [user, userRole]);
+
+  // Handle offline/online transitions
+  useEffect(() => {
+    if (!isOnline && user && userRole === "college") {
+      // Going offline - redirect to public view
+      navigate("/public", { replace: true });
+    } else if (
+      isOnline &&
+      wasAuthenticatedRef.current &&
+      user &&
+      userRole === "college"
+    ) {
+      // Coming back online with valid authentication - return to college
+      if (location.pathname.startsWith("/public")) {
+        navigate("/college", { replace: true });
+      }
+    }
+  }, [isOnline, user, userRole, navigate, location.pathname]);
+
+  // If currently offline, redirect to public
+  if (!isOnline) {
+    return <Navigate to="/public" replace />;
+  }
 
   if (isLoading) {
     return <Loading fullScreen text="Loading..." />;
@@ -25,7 +63,7 @@ export default function CollegeLayout() {
   };
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-gray-50 flex flex-col">
       {/* Header */}
       <header className="bg-white border-b border-gray-200 sticky top-0 z-30">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -64,6 +102,26 @@ export default function CollegeLayout() {
                 }`}
               >
                 Dashboard
+              </Link>
+              <Link
+                to="/college/compare"
+                className={`text-sm font-medium transition-colors ${
+                  location.pathname === "/college/compare"
+                    ? "text-maroon-800"
+                    : "text-gray-600 hover:text-maroon-800"
+                }`}
+              >
+                Compare
+              </Link>
+              <Link
+                to="/college/change-password"
+                className={`text-sm font-medium transition-colors ${
+                  location.pathname === "/college/change-password"
+                    ? "text-maroon-800"
+                    : "text-gray-600 hover:text-maroon-800"
+                }`}
+              >
+                Change Password
               </Link>
               <button
                 onClick={handleSignOut}
@@ -117,6 +175,28 @@ export default function CollegeLayout() {
               >
                 Dashboard
               </Link>
+              <Link
+                to="/college/compare"
+                onClick={() => setIsMenuOpen(false)}
+                className={`block px-4 py-2 text-sm font-medium rounded-lg transition-colors ${
+                  location.pathname === "/college/compare"
+                    ? "bg-maroon-50 text-maroon-800"
+                    : "text-gray-600 hover:bg-gray-100"
+                }`}
+              >
+                Compare
+              </Link>
+              <Link
+                to="/college/change-password"
+                onClick={() => setIsMenuOpen(false)}
+                className={`block px-4 py-2 text-sm font-medium rounded-lg transition-colors ${
+                  location.pathname === "/college/change-password"
+                    ? "bg-maroon-50 text-maroon-800"
+                    : "text-gray-600 hover:bg-gray-100"
+                }`}
+              >
+                Change Password
+              </Link>
               <button
                 onClick={handleSignOut}
                 className="w-full text-left px-4 py-2 text-sm font-medium text-red-600 hover:bg-red-50 rounded-lg transition-colors"
@@ -129,7 +209,7 @@ export default function CollegeLayout() {
       </header>
 
       {/* Main Content */}
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 w-full flex-1">
         <Outlet />
       </main>
 

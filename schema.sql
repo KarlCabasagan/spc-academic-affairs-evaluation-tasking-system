@@ -64,7 +64,7 @@ CREATE TABLE colleges (
 CREATE TABLE evaluation_sessions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     session_token VARCHAR(255) UNIQUE NOT NULL,
-    college_id UUID REFERENCES colleges(id), -- Linked to authenticated college
+    college_id UUID REFERENCES colleges(id) ON DELETE CASCADE, -- Cascades when college is deleted
     started_at TIMESTAMPTZ DEFAULT NOW(),
     completed_at TIMESTAMPTZ,
     is_complete BOOLEAN DEFAULT false
@@ -276,43 +276,35 @@ INSERT INTO areas (area_number, name, description) VALUES
 -- ============================================
 
 -- Function to delete the associated auth user when a college is deleted
-CREATE OR REPLACE FUNCTION public.delete_college_user()
+-- Uses AFTER DELETE because sessions/responses cascade automatically via FK
+CREATE OR REPLACE FUNCTION public.delete_college_auth_user()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public
 AS $$
 BEGIN
-  -- Only attempt to delete if there is a linked user_id
+  -- Delete the auth user if linked
+  -- Sessions and responses are deleted automatically via ON DELETE CASCADE
   IF OLD.user_id IS NOT NULL THEN
     BEGIN
-      -- Delete from auth.users
-      -- Note: This requires the function to be SECURITY DEFINER and have appropriate permissions
-      -- However, standard postgres functions cannot directly delete from auth.users usually without specific setup
-      -- In Supabase, we can use the admin API or rely on ON DELETE CASCADE if configured, 
-      -- but here we are trying to do it via SQL.
-      -- A common pattern is to use an Edge Function for this, but the requirement asked for a DB trigger OR Edge Function.
-      -- Since direct deletion from auth.users via SQL trigger is restricted/complex in some Supabase setups without extensions,
-      -- we will assume the service_role has permissions or this is a valid approach in this specific environment.
-      -- IF NOT, we might need to use an Edge Function triggered by webhook.
-      -- Let's try the SQL approach first as requested.
-      
       DELETE FROM auth.users WHERE id = OLD.user_id;
     EXCEPTION WHEN OTHERS THEN
-      -- Log error but don't stop the deletion of the college record
+      -- Log error but don't stop (college already deleted at this point)
       RAISE WARNING 'Failed to delete auth user %: %', OLD.user_id, SQLERRM;
     END;
   END IF;
+  
   RETURN OLD;
 END;
 $$;
 
--- Trigger to execute the deletion
+-- Trigger to delete auth user after college deletion
 DROP TRIGGER IF EXISTS on_college_delete ON colleges;
 CREATE TRIGGER on_college_delete
   AFTER DELETE ON colleges
   FOR EACH ROW
-  EXECUTE FUNCTION public.delete_college_user();
+  EXECUTE FUNCTION public.delete_college_auth_user();
 
 
 
@@ -454,3 +446,35 @@ ON history_responses FOR ALL
 TO authenticated
 USING (public.get_user_role(auth.uid()) = 'admin')
 WITH CHECK (public.get_user_role(auth.uid()) = 'admin');
+
+-- ============================================
+-- RLS Policies for College Comparison Feature
+-- Allows college users to read ALL colleges' data for comparison
+-- ============================================
+
+-- Allow college users to read all completed sessions for comparison matrix
+CREATE POLICY "College can read all completed sessions for comparison"
+ON evaluation_sessions FOR SELECT
+TO authenticated
+USING (
+  is_complete = true AND 
+  public.get_user_role(auth.uid()) = 'college'
+);
+
+-- Allow college users to read all responses for comparison
+CREATE POLICY "College can read all responses for comparison"
+ON responses FOR SELECT
+TO authenticated
+USING (
+  public.get_user_role(auth.uid()) = 'college' AND
+  session_id IN (SELECT id FROM evaluation_sessions WHERE is_complete = true)
+);
+
+-- Allow college users to read all active colleges for matrix display
+CREATE POLICY "College can read all active colleges for comparison"
+ON colleges FOR SELECT
+TO authenticated
+USING (
+  is_active = true AND 
+  public.get_user_role(auth.uid()) = 'college'
+);

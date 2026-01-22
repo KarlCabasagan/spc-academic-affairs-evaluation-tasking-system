@@ -1,4 +1,10 @@
-import { createContext, useContext, useEffect, useState } from "react";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useState,
+  useCallback,
+} from "react";
 import type { ReactNode } from "react";
 import type { User, Session } from "@supabase/supabase-js";
 import { supabase } from "../lib/supabase";
@@ -10,6 +16,7 @@ interface AuthContextType {
   userRole: UserRole | null;
   college: College | null;
   isLoading: boolean;
+  isOnline: boolean;
   signIn: (email: string, password: string) => Promise<{ error: Error | null }>;
   signOut: () => Promise<void>;
   refreshCollege: () => Promise<void>;
@@ -43,9 +50,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [userRole, setUserRole] = useState<UserRole | null>(null);
   const [college, setCollege] = useState<College | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
 
   // Fetch college profile for college users (background, non-blocking)
-  const fetchCollegeProfile = async (userId: string) => {
+  const fetchCollegeProfile = async (
+    userId: string,
+  ): Promise<College | null> => {
     try {
       const { data } = await supabase
         .from("colleges")
@@ -56,9 +66,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       if (data) {
         setCollege(data as College);
+        return data as College;
       }
+      return null;
     } catch {
       // Ignore errors - college profile is optional enhancement
+      return null;
     }
   };
 
@@ -67,6 +80,74 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       await fetchCollegeProfile(user.id);
     }
   };
+
+  // Sign out function - memoized to use in subscriptions
+  const signOut = useCallback(async () => {
+    setIsLoading(true);
+    await supabase.auth.signOut();
+    setCollege(null);
+    // onAuthStateChange handles the rest
+  }, []);
+
+  // Network status listeners
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, []);
+
+  // Watch for college deletion (auto-logout)
+  useEffect(() => {
+    if (!college || userRole !== "college") return;
+
+    const channel = supabase
+      .channel(`college-deletion-${college.id}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "DELETE",
+          schema: "public",
+          table: "colleges",
+          filter: `id=eq.${college.id}`,
+        },
+        () => {
+          // College was deleted - sign out immediately
+          console.log("College account deleted, signing out...");
+          signOut();
+        },
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "colleges",
+          filter: `id=eq.${college.id}`,
+        },
+        (payload) => {
+          // Check if deactivated
+          if (
+            payload.new &&
+            (payload.new as { is_active?: boolean }).is_active === false
+          ) {
+            console.log("College account deactivated, signing out...");
+            signOut();
+          }
+        },
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [college, userRole, signOut]);
 
   useEffect(() => {
     // Handle session updates - role is read synchronously from metadata
@@ -120,13 +201,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return { error: error as Error | null };
   };
 
-  const signOut = async () => {
-    setIsLoading(true);
-    await supabase.auth.signOut();
-    setCollege(null);
-    // onAuthStateChange handles the rest
-  };
-
   return (
     <AuthContext.Provider
       value={{
@@ -135,6 +209,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         userRole,
         college,
         isLoading,
+        isOnline,
         signIn,
         signOut,
         refreshCollege,

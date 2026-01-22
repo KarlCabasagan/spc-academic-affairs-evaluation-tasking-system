@@ -5,7 +5,12 @@ import { ToastContainer } from "./components/ui";
 import { Loading } from "./components/ui";
 import ForgotPassword from "./pages/ForgotPassword";
 import ResetPassword from "./pages/ResetPassword";
-import { CollegeDashboard, CollegeEvaluate } from "./pages/college";
+import {
+  CollegeDashboard,
+  CollegeEvaluate,
+  CollegeComplianceMatrix,
+  CollegeChangePassword,
+} from "./pages/college";
 import { Landing, Evaluate, Complete, ExportPage } from "./pages/public";
 import {
   Login,
@@ -97,6 +102,8 @@ function App() {
           <Route path="/college" element={<CollegeLayout />}>
             <Route index element={<CollegeDashboard />} />
             <Route path="evaluate/:areaId" element={<CollegeEvaluate />} />
+            <Route path="compare" element={<CollegeComplianceMatrix />} />
+            <Route path="change-password" element={<CollegeChangePassword />} />
           </Route>
 
           {/* 404 - Redirect to root */}
