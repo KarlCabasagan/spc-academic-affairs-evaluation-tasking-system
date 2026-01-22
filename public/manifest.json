@@ -4,21 +4,33 @@
   "description": "Self-evaluation system for PACUCOA accreditation areas",
   "start_url": "/public",
   "display": "standalone",
-  "background_color": "#ffffff",
-  "theme_color": "#800000",
+  "background_color": "#800020",
+  "theme_color": "#800020",
   "orientation": "portrait-primary",
   "icons": [
     {
-      "src": "/spc-logo.png",
+      "src": "/icon-192.png",
       "sizes": "192x192",
       "type": "image/png",
-      "purpose": "any maskable"
+      "purpose": "any"
     },
     {
-      "src": "/spc-logo.png",
+      "src": "/icon-512.png",
       "sizes": "512x512",
       "type": "image/png",
-      "purpose": "any maskable"
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
     }
   ],
   "categories": ["education", "productivity"],
