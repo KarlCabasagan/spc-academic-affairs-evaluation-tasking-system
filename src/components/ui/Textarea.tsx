@@ -1,4 +1,4 @@
-import { forwardRef } from "react";
+import { forwardRef, useId } from "react";
 import type { TextareaHTMLAttributes } from "react";
 
 interface TextareaProps extends TextareaHTMLAttributes<HTMLTextAreaElement> {
@@ -9,7 +9,16 @@ interface TextareaProps extends TextareaHTMLAttributes<HTMLTextAreaElement> {
 
 const Textarea = forwardRef<HTMLTextAreaElement, TextareaProps>(
   ({ className = "", label, error, helperText, id, ...props }, ref) => {
-    const textareaId = id || label?.toLowerCase().replace(/\s+/g, "-");
+    const generatedId = useId();
+    const textareaId = id || generatedId;
+    const errorId = `${textareaId}-error`;
+    const helperId = `${textareaId}-helper`;
+
+    const describedBy = error
+      ? errorId
+      : helperText
+        ? helperId
+        : props["aria-describedby"];
 
     return (
       <div className="w-full">
@@ -24,28 +33,36 @@ const Textarea = forwardRef<HTMLTextAreaElement, TextareaProps>(
         <textarea
           ref={ref}
           id={textareaId}
+          aria-invalid={error ? true : undefined}
+          aria-describedby={describedBy}
           className={`
-            w-full px-4 py-2.5 rounded-lg border transition-all duration-200
-            text-gray-900 placeholder-gray-400 resize-none
+            w-full px-4 py-2.5 rounded-lg border transition-colors duration-150
+            text-gray-900 placeholder-gray-500 resize-none
             focus:outline-none focus:ring-2 focus:ring-offset-0
             ${
               error
                 ? "border-red-300 focus:border-red-500 focus:ring-red-200"
                 : "border-gray-200 focus:border-maroon-500 focus:ring-maroon-100"
             }
-            disabled:bg-gray-50 disabled:text-gray-500 disabled:cursor-not-allowed
+            disabled:bg-gray-50 disabled:text-gray-600 disabled:cursor-not-allowed
             ${className}
           `}
           rows={4}
           {...props}
         />
-        {error && <p className="mt-1.5 text-sm text-red-600">{error}</p>}
+        {error && (
+          <p id={errorId} role="alert" className="mt-1.5 text-sm text-red-700">
+            {error}
+          </p>
+        )}
         {helperText && !error && (
-          <p className="mt-1.5 text-sm text-gray-500">{helperText}</p>
+          <p id={helperId} className="mt-1.5 text-sm text-gray-600">
+            {helperText}
+          </p>
         )}
       </div>
     );
-  }
+  },
 );
 
 Textarea.displayName = "Textarea";
