@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { supabase } from "../lib/supabase";
 import type { Area, Question } from "../lib/types";
-import { calculateOverallCompliance as calcOverallCompliance } from "../lib/compliance";
 import {
   type AllResponses,
   type AreaResponses,
@@ -262,22 +261,6 @@ export function useOfflineEvaluation() {
     return readStorageJson(STORAGE_KEYS.RESPONSES, isResponseMap, {});
   }, []);
 
-  // Kept only until ExportPage migrates to compliance.ts SSOT
-  const calculateOverallCompliance = useCallback((): number | null => {
-    const allResponses = getAllResponses();
-    const areaCompliances = Object.values(allResponses).map((areaResponses) => {
-      const applicable = Object.values(areaResponses).filter(
-        (r) => r.answered && r.status !== "not_applicable",
-      );
-      if (applicable.length === 0) return null;
-      const complied = applicable.filter(
-        (r) => r.status === "complied",
-      ).length;
-      return (complied / applicable.length) * 100;
-    });
-    return calcOverallCompliance(areaCompliances);
-  }, [getAllResponses]);
-
   return {
     isOnline,
     isLoading,
@@ -293,6 +276,5 @@ export function useOfflineEvaluation() {
     clearAreaResponses,
     clearAllData,
     getAllResponses,
-    calculateOverallCompliance,
   };
 }
