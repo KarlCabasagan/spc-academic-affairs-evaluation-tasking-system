@@ -17,9 +17,9 @@ const Card = forwardRef<HTMLDivElement, CardProps>(
       children,
       ...props
     },
-    ref
+    ref,
   ) => {
-    const baseStyles = "bg-white rounded-xl transition-all duration-200";
+    const baseStyles = "bg-white rounded-xl";
 
     const variants = {
       default: "shadow-sm border border-gray-100",
@@ -35,7 +35,7 @@ const Card = forwardRef<HTMLDivElement, CardProps>(
     };
 
     const hoverStyles = hover
-      ? "hover:shadow-lg hover:border-maroon-200 cursor-pointer hover:-translate-y-0.5"
+      ? "transition-[transform,box-shadow,border-color] duration-150 ease-out hover:shadow-lg hover:border-maroon-200 cursor-pointer hover:-translate-y-0.5"
       : "";
 
     return (
@@ -47,7 +47,7 @@ const Card = forwardRef<HTMLDivElement, CardProps>(
         {children}
       </div>
     );
-  }
+  },
 );
 
 Card.displayName = "Card";
