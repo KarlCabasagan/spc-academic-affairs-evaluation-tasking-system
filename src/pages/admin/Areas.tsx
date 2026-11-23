@@ -1,24 +1,37 @@
-import { useEffect, useState } from "react";
-import type { FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
-import { supabase } from "../../lib/supabase";
-import { useAuth } from "../../context/useAuth";
-import type { Area, AreaFormData } from "../../lib/types";
 import {
+  AlertTriangleIcon,
   Button,
+  buttonVariants,
   Card,
-  Input,
-  Textarea,
-  Modal,
   ConfirmDialog,
+  EditIcon,
+  EyeIcon,
+  EyeOffIcon,
+  InfoCircleIcon,
+  Input,
   Loading,
+  Modal,
+  PlusIcon,
   showToast,
+  Textarea,
+  TrashIcon,
 } from "../../components/ui";
+import { useAuth } from "../../context/useAuth";
+import { supabase, supabaseNoPersist } from "../../lib/supabase";
+import type { Area, AreaFormData } from "../../lib/types";
 
 interface CollegeWithResponses {
   id: string;
   name: string;
   code: string | null;
+}
+
+interface JoinedResponseCollegeRow {
+  evaluation_sessions: {
+    colleges: CollegeWithResponses | null;
+  } | null;
 }
 
 export default function Areas() {
@@ -29,6 +42,8 @@ export default function Areas() {
   const [isDeleteOpen, setIsDeleteOpen] = useState(false);
   const [selectedArea, setSelectedArea] = useState<Area | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [checkingDeleteId, setCheckingDeleteId] = useState<string | null>(null);
+  const [togglingIds, setTogglingIds] = useState<Set<string>>(() => new Set());
 
   // Clear all areas modal state
   const [showClearAllModal, setShowClearAllModal] = useState(false);
@@ -43,14 +58,10 @@ export default function Areas() {
 
   // Form state
   const [formData, setFormData] = useState<AreaFormData>({
-    area_number: 0,
+    area_number: 1,
     name: "",
     description: "",
   });
-
-  useEffect(() => {
-    fetchAreas();
-  }, []);
 
   const fetchAreas = async () => {
     try {
@@ -60,71 +71,50 @@ export default function Areas() {
         .order("area_number", { ascending: true });
 
       if (error) throw error;
-      setAreas(data || []);
-    } catch (error) {
-      console.error("Error fetching areas:", error);
-      showToast("Failed to load areas", "error");
+      setAreas((data || []) as Area[]);
+    } catch {
+      showToast("Failed to load evaluation areas.", "error");
     } finally {
       setIsLoading(false);
     }
   };
 
-  // Check if an area has any responses from colleges
+  useEffect(() => {
+    void fetchAreas();
+  }, []);
+
   const checkAreaResponses = async (
-    areaId: string
+    areaId: string,
   ): Promise<CollegeWithResponses[]> => {
-    try {
-      // Get all questions in this area
-      const { data: questions, error: questionsError } = await supabase
-        .from("questions")
-        .select("id")
-        .eq("area_id", areaId);
-
-      if (questionsError) throw questionsError;
-      if (!questions || questions.length === 0) return [];
-
-      const questionIds = questions.map((q) => q.id);
-
-      // Get all responses for these questions
-      const { data: responses, error: responsesError } = await supabase
-        .from("responses")
-        .select(
-          `
-          id,
-          session_id,
-          evaluation_sessions!inner (
-            college_id,
-            colleges!inner (
-              id,
-              name,
-              code
-            )
-          )
+    const { data, error } = await supabase
+      .from("responses")
+      .select(
         `
-        )
-        .in("question_id", questionIds);
+          id,
+          questions!inner(area_id),
+          evaluation_sessions!inner(
+            colleges!inner(id, name, code)
+          )
+        `,
+      )
+      .eq("questions.area_id", areaId);
 
-      if (responsesError) throw responsesError;
-      if (!responses || responses.length === 0) return [];
+    if (error) throw error;
+    if (!data || data.length === 0) return [];
 
-      // Extract unique colleges
-      const collegeMap = new Map<string, CollegeWithResponses>();
-      responses.forEach((r: any) => {
-        const college = r.evaluation_sessions?.colleges;
-        if (college && !collegeMap.has(college.id)) {
-          collegeMap.set(college.id, {
-            id: college.id,
-            name: college.name,
-            code: college.code,
-          });
-        }
-      });
+    const collegeMap = new Map<string, CollegeWithResponses>();
+    (data as unknown as JoinedResponseCollegeRow[]).forEach((row) => {
+      const college = row.evaluation_sessions?.colleges;
+      if (college && !collegeMap.has(college.id)) {
+        collegeMap.set(college.id, {
+          id: college.id,
+          name: college.name,
+          code: college.code,
+        });
+      }
+    });
 
-      return Array.from(collegeMap.values());
-    } catch (error) {
-      console.error("Error checking area responses:", error);
-      return [];
-    }
+    return Array.from(collegeMap.values());
   };
 
   const openCreateModal = () => {
@@ -149,31 +139,46 @@ export default function Areas() {
   };
 
   const openDeleteDialog = async (area: Area) => {
+    if (checkingDeleteId) return;
+    setCheckingDeleteId(area.id);
     setSelectedArea(area);
 
-    // Check for responses before opening delete dialog
-    const colleges = await checkAreaResponses(area.id);
-    setCollegesWithResponses(colleges);
+    try {
+      const colleges = await checkAreaResponses(area.id);
+      setCollegesWithResponses(colleges);
 
-    if (colleges.length > 0) {
-      setShowResponseWarning(true);
-    } else {
-      setIsDeleteOpen(true);
+      if (colleges.length > 0) {
+        setShowResponseWarning(true);
+      } else {
+        setIsDeleteOpen(true);
+      }
+    } catch {
+      showToast(
+        "Failed to check existing responses for this area. Deletion was cancelled.",
+        "error",
+      );
+      setSelectedArea(null);
+    } finally {
+      setCheckingDeleteId(null);
     }
   };
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
 
+    if (!Number.isInteger(formData.area_number) || formData.area_number < 1) {
+      showToast("Area number must be at least 1.", "error");
+      return;
+    }
+
     if (!formData.name.trim()) {
-      showToast("Please enter an area name", "error");
+      showToast("Please enter an area name.", "error");
       return;
     }
 
     setIsSubmitting(true);
     try {
       if (selectedArea) {
-        // Update
         const { error } = await supabase
           .from("areas")
           .update({
@@ -184,9 +189,8 @@ export default function Areas() {
           .eq("id", selectedArea.id);
 
         if (error) throw error;
-        showToast("Area updated successfully", "success");
+        showToast("Area updated successfully.", "success");
       } else {
-        // Create
         const { error } = await supabase.from("areas").insert({
           area_number: formData.area_number,
           name: formData.name.trim(),
@@ -194,21 +198,20 @@ export default function Areas() {
         });
 
         if (error) throw error;
-        showToast("Area created successfully", "success");
+        showToast("Area created successfully.", "success");
       }
 
       setIsModalOpen(false);
-      fetchAreas();
-    } catch (error) {
-      console.error("Error saving area:", error);
-      showToast("Failed to save area", "error");
+      await fetchAreas();
+    } catch {
+      showToast("Failed to save area.", "error");
     } finally {
       setIsSubmitting(false);
     }
   };
 
   const handleDelete = async () => {
-    if (!selectedArea) return;
+    if (!selectedArea || isSubmitting) return;
 
     setIsSubmitting(true);
     try {
@@ -218,80 +221,81 @@ export default function Areas() {
         .eq("id", selectedArea.id);
 
       if (error) throw error;
-      showToast("Area deleted successfully", "success");
+      showToast("Area deleted successfully.", "success");
       setIsDeleteOpen(false);
       setShowResponseWarning(false);
-      fetchAreas();
-    } catch (error) {
-      console.error("Error deleting area:", error);
-      showToast("Failed to delete area", "error");
+      setCollegesWithResponses([]);
+      await fetchAreas();
+    } catch {
+      showToast("Failed to delete area.", "error");
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  const handleClearAllAreas = async () => {
+  const handleClearAllAreas = async (e: FormEvent) => {
+    e.preventDefault();
     if (!user?.email) {
-      showToast("User not authenticated", "error");
+      showToast("User not authenticated.", "error");
       return;
     }
 
     if (!clearAllPassword.trim()) {
-      showToast("Please enter your password", "error");
+      showToast("Please enter your password.", "error");
       return;
     }
 
     setIsClearingAll(true);
     try {
-      // Verify admin password
-      const { error: authError } = await supabase.auth.signInWithPassword({
-        email: user.email,
-        password: clearAllPassword,
-      });
+      const { error: authError } =
+        await supabaseNoPersist.auth.signInWithPassword({
+          email: user.email,
+          password: clearAllPassword,
+        });
 
       if (authError) {
         showToast("Invalid password. Please try again.", "error");
         return;
       }
 
-      // Delete all responses first (foreign key constraint)
-      const { error: responsesError } = await supabase
-        .from("responses")
-        .delete()
-        .neq("id", "00000000-0000-0000-0000-000000000000");
+      const { error: rpcError } = await supabase.rpc("clear_all_areas_data");
+      if (rpcError) {
+        if (rpcError.code !== "PGRST202") {
+          throw rpcError;
+        }
 
-      if (responsesError) throw responsesError;
+        // Pre-migration fallback: delete leaf-to-root strictly checking every error
+        const sentinelId = "00000000-0000-0000-0000-000000000000";
+        const { error: responsesError } = await supabase
+          .from("responses")
+          .delete()
+          .neq("id", sentinelId);
+        if (responsesError) throw responsesError;
 
-      // Delete all evaluation sessions
-      const { error: sessionsError } = await supabase
-        .from("evaluation_sessions")
-        .delete()
-        .neq("id", "00000000-0000-0000-0000-000000000000");
+        const { error: sessionsError } = await supabase
+          .from("evaluation_sessions")
+          .delete()
+          .neq("id", sentinelId);
+        if (sessionsError) throw sessionsError;
 
-      if (sessionsError) throw sessionsError;
+        const { error: questionsError } = await supabase
+          .from("questions")
+          .delete()
+          .neq("id", sentinelId);
+        if (questionsError) throw questionsError;
 
-      // Delete all questions
-      const { error: questionsError } = await supabase
-        .from("questions")
-        .delete()
-        .neq("id", "00000000-0000-0000-0000-000000000000");
+        const { error: areasError } = await supabase
+          .from("areas")
+          .delete()
+          .neq("id", sentinelId);
+        if (areasError) throw areasError;
+      }
 
-      if (questionsError) throw questionsError;
-
-      // Delete all areas
-      const { error: areasError } = await supabase
-        .from("areas")
-        .delete()
-        .neq("id", "00000000-0000-0000-0000-000000000000");
-
-      if (areasError) throw areasError;
-
-      showToast("All areas and questions have been cleared", "success");
+      showToast("All areas and questions have been cleared.", "success");
       setShowClearAllModal(false);
       setClearAllPassword("");
-      fetchAreas();
-    } catch (error) {
-      console.error("Error clearing all areas:", error);
+      await fetchAreas();
+    } catch {
       showToast("Failed to clear areas. Please try again.", "error");
     } finally {
       setIsClearingAll(false);
@@ -299,6 +303,9 @@ export default function Areas() {
   };
 
   const toggleActive = async (area: Area) => {
+    if (togglingIds.has(area.id)) return;
+    setTogglingIds((prev) => new Set(prev).add(area.id));
+
     try {
       const { error } = await supabase
         .from("areas")
@@ -307,20 +314,25 @@ export default function Areas() {
 
       if (error) throw error;
       showToast(
-        `Area ${area.is_active ? "deactivated" : "activated"}`,
-        "success"
+        `Area ${area.is_active ? "deactivated" : "activated"}.`,
+        "success",
       );
-      fetchAreas();
-    } catch (error) {
-      console.error("Error toggling area:", error);
-      showToast("Failed to update area status", "error");
+      await fetchAreas();
+    } catch {
+      showToast("Failed to update area status.", "error");
+    } finally {
+      setTogglingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(area.id);
+        return next;
+      });
     }
   };
 
   if (isLoading) {
     return (
       <div className="flex items-center justify-center py-16">
-        <Loading size="lg" text="Loading areas..." />
+        <Loading size="lg" text="Loading areas…" />
       </div>
     );
   }
@@ -333,43 +345,23 @@ export default function Areas() {
           <h1 className="text-2xl sm:text-3xl font-bold text-gray-900">
             Evaluation Areas
           </h1>
-          <p className="text-gray-600 mt-1">
-            Manage PACUCOA evaluation areas and their questions
+          <p className="text-gray-600 max-w-prose mt-1">
+            Manage PACUCOA evaluation areas and configure their criteria.
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {areas.length > 0 && (
-            <Button variant="danger" onClick={() => setShowClearAllModal(true)}>
-              <svg
-                className="w-4 h-4"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
-                />
-              </svg>
+            <Button
+              type="button"
+              variant="danger"
+              onClick={() => setShowClearAllModal(true)}
+            >
+              <TrashIcon className="w-4 h-4" />
               Clear All
             </Button>
           )}
-          <Button onClick={openCreateModal}>
-            <svg
-              className="w-5 h-5"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M12 4v16m8-8H4"
-              />
-            </svg>
+          <Button type="button" onClick={openCreateModal}>
+            <PlusIcon className="w-5 h-5" />
             Add Area
           </Button>
         </div>
@@ -378,211 +370,172 @@ export default function Areas() {
       {/* Areas List */}
       {areas.length === 0 ? (
         <Card className="text-center py-12">
-          <svg
-            className="w-16 h-16 text-gray-300 mx-auto mb-4"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={2}
-              d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"
-            />
-          </svg>
-          <h3 className="text-lg font-medium text-gray-900 mb-2">
+          <InfoCircleIcon className="w-12 h-12 text-gray-400 mx-auto mb-3" />
+          <h2 className="text-lg font-medium text-gray-900 mb-2">
             No areas yet
-          </h3>
-          <p className="text-gray-500 mb-6">
+          </h2>
+          <p className="text-gray-600 max-w-prose mx-auto mb-6">
             Create your first evaluation area to get started.
           </p>
-          <Button onClick={openCreateModal}>Create Area</Button>
+          <Button type="button" onClick={openCreateModal}>
+            Create Area
+          </Button>
         </Card>
       ) : (
         <div className="space-y-4">
-          {areas.map((area) => (
-            <Card
-              key={area.id}
-              className="flex flex-col sm:flex-row sm:items-center gap-4"
-            >
-              <div className="flex items-center gap-4 flex-1 min-w-0">
-                <div
-                  className={`
-                  w-12 h-12 rounded-xl flex items-center justify-center font-bold text-lg shrink-0
-                  ${
-                    area.is_active
-                      ? "bg-maroon-100 text-maroon-800"
-                      : "bg-gray-100 text-gray-400"
-                  }
-                `}
-                >
-                  {area.area_number}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <h3
-                      className={`font-semibold truncate ${
-                        area.is_active ? "text-gray-900" : "text-gray-400"
-                      }`}
-                    >
-                      {area.name}
-                    </h3>
-                    {!area.is_active && (
-                      <span className="px-2 py-0.5 bg-gray-100 text-gray-500 text-xs rounded-full shrink-0">
-                        Inactive
-                      </span>
+          {areas.map((area) => {
+            const isToggling = togglingIds.has(area.id);
+            const isChecking = checkingDeleteId === area.id;
+
+            return (
+              <Card
+                key={area.id}
+                className="flex flex-col sm:flex-row sm:items-center gap-4"
+              >
+                <div className="flex items-center gap-4 flex-1 min-w-0">
+                  <div
+                    className={`w-12 h-12 rounded-xl flex items-center justify-center font-bold text-lg tabular-nums shrink-0 ${
+                      area.is_active
+                        ? "bg-maroon-100 text-maroon-800"
+                        : "bg-gray-100 text-gray-500"
+                    }`}
+                  >
+                    {area.area_number}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <h2
+                        className={`text-base font-semibold truncate ${
+                          area.is_active ? "text-gray-900" : "text-gray-600"
+                        }`}
+                      >
+                        {area.name}
+                      </h2>
+                      {!area.is_active && (
+                        <span className="px-2 py-0.5 bg-gray-100 text-gray-700 text-xs font-medium rounded-full shrink-0">
+                          Inactive
+                        </span>
+                      )}
+                    </div>
+                    {area.description && (
+                      <p
+                        className={`text-sm truncate mt-0.5 ${
+                          area.is_active ? "text-gray-600" : "text-gray-500"
+                        }`}
+                      >
+                        {area.description}
+                      </p>
                     )}
                   </div>
-                  {area.description && (
-                    <p
-                      className={`text-sm truncate ${
-                        area.is_active ? "text-gray-500" : "text-gray-400"
-                      }`}
-                    >
-                      {area.description}
-                    </p>
-                  )}
                 </div>
-              </div>
 
-              <div className="flex items-center gap-2 shrink-0">
-                <Link to={`/admin/areas/${area.id}`}>
-                  <Button variant="secondary" size="sm">
-                    <svg
-                      className="w-4 h-4"
-                      fill="none"
-                      stroke="currentColor"
-                      viewBox="0 0 24 24"
-                    >
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        strokeWidth={2}
-                        d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-                      />
-                    </svg>
+                <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                  <Link
+                    to={`/admin/areas/${area.id}`}
+                    className={buttonVariants({
+                      variant: "secondary",
+                      size: "sm",
+                      className: "min-h-11 mr-1",
+                    })}
+                  >
+                    <InfoCircleIcon className="w-4 h-4" />
                     Questions
+                  </Link>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => void toggleActive(area)}
+                    isLoading={isToggling}
+                    disabled={isToggling}
+                    aria-label={
+                      area.is_active
+                        ? `Deactivate ${area.name}`
+                        : `Activate ${area.name}`
+                    }
+                    aria-pressed={area.is_active}
+                    className="w-11 h-11 p-0"
+                  >
+                    {area.is_active ? (
+                      <EyeOffIcon className="w-4 h-4 text-gray-600" />
+                    ) : (
+                      <EyeIcon className="w-4 h-4 text-emerald-700" />
+                    )}
                   </Button>
-                </Link>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => toggleActive(area)}
-                >
-                  {area.is_active ? (
-                    <svg
-                      className="w-4 h-4 text-gray-500"
-                      fill="none"
-                      stroke="currentColor"
-                      viewBox="0 0 24 24"
-                    >
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        strokeWidth={2}
-                        d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.878 9.878L3 3m6.879 6.879L21 21"
-                      />
-                    </svg>
-                  ) : (
-                    <svg
-                      className="w-4 h-4 text-green-600"
-                      fill="none"
-                      stroke="currentColor"
-                      viewBox="0 0 24 24"
-                    >
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        strokeWidth={2}
-                        d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
-                      />
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        strokeWidth={2}
-                        d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"
-                      />
-                    </svg>
-                  )}
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => openEditModal(area)}
-                >
-                  <svg
-                    className="w-4 h-4"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => openEditModal(area)}
+                    aria-label={`Edit ${area.name}`}
+                    className="w-11 h-11 p-0"
                   >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={2}
-                      d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
-                    />
-                  </svg>
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => openDeleteDialog(area)}
-                >
-                  <svg
-                    className="w-4 h-4 text-red-500"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
+                    <EditIcon className="w-4 h-4 text-gray-700" />
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => void openDeleteDialog(area)}
+                    isLoading={isChecking}
+                    disabled={checkingDeleteId !== null}
+                    aria-label={`Delete ${area.name}`}
+                    className="w-11 h-11 p-0 text-red-700 hover:bg-red-50"
                   >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={2}
-                      d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
-                    />
-                  </svg>
-                </Button>
-              </div>
-            </Card>
-          ))}
+                    <TrashIcon className="w-4 h-4" />
+                  </Button>
+                </div>
+              </Card>
+            );
+          })}
         </div>
       )}
 
       {/* Create/Edit Modal */}
       <Modal
         isOpen={isModalOpen}
+        preventClose={isSubmitting}
         onClose={() => setIsModalOpen(false)}
         title={selectedArea ? "Edit Area" : "Create Area"}
         footer={
           <>
             <Button
+              type="button"
               variant="ghost"
               onClick={() => setIsModalOpen(false)}
               disabled={isSubmitting}
             >
               Cancel
             </Button>
-            <Button onClick={handleSubmit} isLoading={isSubmitting}>
-              {selectedArea ? "Save Changes" : "Create Area"}
+            <Button
+              type="submit"
+              form="area-form"
+              isLoading={isSubmitting}
+            >
+              {isSubmitting
+                ? "Saving…"
+                : selectedArea
+                  ? "Save Changes"
+                  : "Create Area"}
             </Button>
           </>
         }
       >
-        <form onSubmit={handleSubmit} className="space-y-4">
+        <form id="area-form" onSubmit={handleSubmit} className="space-y-4">
           <Input
             label="Area Number"
             type="number"
             min={1}
-            value={formData.area_number}
-            onChange={(e) =>
+            value={formData.area_number || ""}
+            onChange={(e) => {
+              const parsed = Number.parseInt(e.target.value, 10);
               setFormData((prev) => ({
                 ...prev,
-                area_number: parseInt(e.target.value) || 0,
-              }))
-            }
+                area_number: Number.isNaN(parsed) ? 0 : parsed,
+              }));
+            }}
             required
+            disabled={isSubmitting}
           />
           <Input
             label="Area Name"
@@ -592,14 +545,16 @@ export default function Areas() {
               setFormData((prev) => ({ ...prev, name: e.target.value }))
             }
             required
+            disabled={isSubmitting}
           />
           <Textarea
             label="Description"
-            placeholder="Brief description of the evaluation area..."
+            placeholder="Brief description of the evaluation area…"
             value={formData.description || ""}
             onChange={(e) =>
               setFormData((prev) => ({ ...prev, description: e.target.value }))
             }
+            disabled={isSubmitting}
           />
         </form>
       </Modal>
@@ -608,7 +563,7 @@ export default function Areas() {
       <ConfirmDialog
         isOpen={isDeleteOpen}
         onClose={() => setIsDeleteOpen(false)}
-        onConfirm={handleDelete}
+        onConfirm={() => void handleDelete()}
         title="Delete Area"
         message={`Are you sure you want to delete "${selectedArea?.name}"? This will also delete all questions in this area. This action cannot be undone.`}
         confirmText="Delete"
@@ -619,67 +574,19 @@ export default function Areas() {
       {/* Delete Warning with Responses */}
       <Modal
         isOpen={showResponseWarning}
+        preventClose={isSubmitting}
         onClose={() => {
           setShowResponseWarning(false);
           setCollegesWithResponses([]);
         }}
         title="Warning: Area Has Responses"
         size="md"
-      >
-        <div className="space-y-4">
-          <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
-            <div className="flex items-start gap-3">
-              <svg
-                className="w-5 h-5 text-amber-600 shrink-0 mt-0.5"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
-                />
-              </svg>
-              <div>
-                <h4 className="font-semibold text-amber-800">
-                  This area contains responses from colleges
-                </h4>
-                <p className="text-sm text-amber-700 mt-1">
-                  Deleting this area will also permanently delete all responses
-                  from the following colleges:
-                </p>
-              </div>
-            </div>
-          </div>
-
-          <div className="bg-gray-50 rounded-lg p-4">
-            <h5 className="text-sm font-medium text-gray-700 mb-2">
-              Affected Colleges:
-            </h5>
-            <ul className="space-y-1">
-              {collegesWithResponses.map((college) => (
-                <li
-                  key={college.id}
-                  className="text-sm text-gray-600 flex items-center gap-2"
-                >
-                  <span className="w-2 h-2 bg-maroon-500 rounded-full" />
-                  {college.code ? `${college.code} - ` : ""}
-                  {college.name}
-                </li>
-              ))}
-            </ul>
-          </div>
-
-          <p className="text-sm text-gray-600">
-            Are you sure you want to delete{" "}
-            <strong>"{selectedArea?.name}"</strong> and all its responses?
-          </p>
-
-          <div className="flex justify-end gap-3 pt-2">
+        footer={
+          <>
             <Button
+              type="button"
               variant="secondary"
+              disabled={isSubmitting}
               onClick={() => {
                 setShowResponseWarning(false);
                 setCollegesWithResponses([]);
@@ -688,75 +595,76 @@ export default function Areas() {
               Cancel
             </Button>
             <Button
+              type="button"
               variant="danger"
-              onClick={handleDelete}
+              onClick={() => void handleDelete()}
               isLoading={isSubmitting}
             >
-              Delete Anyway
+              {isSubmitting ? "Deleting…" : "Delete Anyway"}
             </Button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+            <div className="flex items-start gap-3">
+              <AlertTriangleIcon className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
+              <div>
+                <h3 className="font-semibold text-amber-900">
+                  This area contains responses from colleges
+                </h3>
+                <p className="text-sm text-amber-800 max-w-prose mt-1">
+                  Deleting this area will permanently delete all recorded
+                  responses from the following colleges:
+                </p>
+              </div>
+            </div>
           </div>
+
+          <div className="bg-gray-50 rounded-lg p-4 border border-gray-200">
+            <h4 className="text-sm font-medium text-gray-800 mb-2">
+              Affected Colleges:
+            </h4>
+            <ul className="space-y-1">
+              {collegesWithResponses.map((college) => (
+                <li
+                  key={college.id}
+                  className="text-sm text-gray-700 flex items-center gap-2"
+                >
+                  <span
+                    className="w-2 h-2 bg-maroon-600 rounded-full shrink-0"
+                    aria-hidden="true"
+                  />
+                  {college.code ? `${college.code} - ` : ""}
+                  {college.name}
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          <p className="text-sm text-gray-700 max-w-prose">
+            Are you sure you want to delete{" "}
+            <strong>"{selectedArea?.name}"</strong> and all its responses?
+          </p>
         </div>
       </Modal>
 
       {/* Clear All Areas Modal */}
       <Modal
         isOpen={showClearAllModal}
+        preventClose={isClearingAll}
         onClose={() => {
           setShowClearAllModal(false);
           setClearAllPassword("");
         }}
         title="Clear All Areas?"
         size="md"
-      >
-        <div className="space-y-4">
-          <div className="bg-red-50 border border-red-200 rounded-lg p-4">
-            <div className="flex items-start gap-3">
-              <svg
-                className="w-5 h-5 text-red-600 shrink-0 mt-0.5"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
-                />
-              </svg>
-              <div>
-                <h4 className="font-semibold text-red-800">Danger Zone</h4>
-                <p className="text-sm text-red-700 mt-1">
-                  This will <strong>permanently delete</strong>:
-                </p>
-                <ul className="text-sm text-red-700 mt-2 list-disc list-inside">
-                  <li>All {areas.length} evaluation areas</li>
-                  <li>All questions in all areas</li>
-                  <li>All evaluation sessions and responses</li>
-                </ul>
-                <p className="text-sm text-red-700 mt-2 font-medium">
-                  This action CANNOT be undone.
-                </p>
-              </div>
-            </div>
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Enter your password to confirm
-            </label>
-            <input
-              type="password"
-              value={clearAllPassword}
-              onChange={(e) => setClearAllPassword(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-red-500"
-              placeholder="Your admin password"
-            />
-          </div>
-
-          <div className="flex justify-end gap-3 pt-2">
+        footer={
+          <>
             <Button
+              type="button"
               variant="secondary"
+              disabled={isClearingAll}
               onClick={() => {
                 setShowClearAllModal(false);
                 setClearAllPassword("");
@@ -765,15 +673,54 @@ export default function Areas() {
               Cancel
             </Button>
             <Button
+              type="submit"
+              form="clear-areas-form"
               variant="danger"
-              onClick={handleClearAllAreas}
               isLoading={isClearingAll}
               disabled={!clearAllPassword.trim()}
             >
-              Clear All Areas
+              {isClearingAll ? "Clearing…" : "Clear All Areas"}
             </Button>
+          </>
+        }
+      >
+        <form
+          id="clear-areas-form"
+          onSubmit={handleClearAllAreas}
+          className="space-y-4"
+        >
+          <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+            <div className="flex items-start gap-3">
+              <AlertTriangleIcon className="w-5 h-5 text-red-700 shrink-0 mt-0.5" />
+              <div>
+                <h3 className="font-semibold text-red-900">Danger Zone</h3>
+                <p className="text-sm text-red-800 max-w-prose mt-1">
+                  This will <strong>permanently delete</strong>:
+                </p>
+                <ul className="text-sm text-red-800 mt-2 list-disc list-inside tabular-nums space-y-0.5">
+                  <li>All {areas.length} evaluation areas</li>
+                  <li>All questions across every area</li>
+                  <li>All evaluation sessions and responses</li>
+                </ul>
+                <p className="text-sm text-red-800 mt-2 font-medium">
+                  This action cannot be undone.
+                </p>
+              </div>
+            </div>
           </div>
-        </div>
+
+          <Input
+            label="Enter your password to confirm"
+            type="password"
+            value={clearAllPassword}
+            onChange={(e) => setClearAllPassword(e.target.value)}
+            placeholder="Your admin password"
+            autoComplete="current-password"
+            showPasswordToggle
+            required
+            disabled={isClearingAll}
+          />
+        </form>
       </Modal>
     </div>
   );
