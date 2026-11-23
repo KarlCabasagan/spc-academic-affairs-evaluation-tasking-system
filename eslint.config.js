@@ -20,4 +20,13 @@ export default defineConfig([
       globals: globals.browser,
     },
   },
+  {
+    files: ['supabase/functions/**/*.ts'],
+    languageOptions: {
+      globals: {
+        ...globals.browser,
+        Deno: 'readonly',
+      },
+    },
+  },
 ])
