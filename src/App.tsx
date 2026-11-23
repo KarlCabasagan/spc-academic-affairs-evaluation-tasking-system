@@ -1,4 +1,10 @@
-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import {
+  BrowserRouter,
+  Routes,
+  Route,
+  Navigate,
+  useParams,
+} from "react-router-dom";
 import { AuthProvider, useAuth } from "./context/AuthContext";
 import { AdminLayout, CollegeLayout, PublicLayout } from "./components/layout";
 import { ToastContainer } from "./components/ui";
@@ -30,11 +36,11 @@ function RootRedirect() {
   const { user, userRole, isLoading } = useAuth();
 
   if (isLoading) {
-    return <Loading fullScreen text="Loading..." />;
+    return <Loading fullScreen text="Loading…" />;
   }
 
-  // If not logged in, show the public landing page
-  if (!user) {
+  // If not logged in or no recognized role, show the public landing page
+  if (!user || !userRole) {
     return <Navigate to="/public" replace />;
   }
 
@@ -43,6 +49,13 @@ function RootRedirect() {
   }
 
   return <Navigate to="/admin/dashboard" replace />;
+}
+
+function EvaluateRedirect() {
+  const { areaId } = useParams<{ areaId: string }>();
+  return (
+    <Navigate to={areaId ? `/public/evaluate/${areaId}` : "/public"} replace />
+  );
 }
 
 function App() {
@@ -61,10 +74,7 @@ function App() {
           </Route>
 
           {/* Shortcut routes for public pages */}
-          <Route
-            path="/evaluate/:areaId"
-            element={<Navigate to="/public/evaluate/:areaId" replace />}
-          />
+          <Route path="/evaluate/:areaId" element={<EvaluateRedirect />} />
           <Route
             path="/export"
             element={<Navigate to="/public/export" replace />}
