@@ -1,112 +1,62 @@
 import { useEffect, useState } from "react";
+import { CheckIcon, CloseIcon, InfoCircleIcon } from "./Icons";
+import {
+  dismissToast,
+  subscribeToasts,
+  type ToastItem,
+  type ToastType,
+} from "./toastBus";
 
-export type ToastType = "success" | "error" | "info";
+const TONE_STYLES: Record<ToastType, string> = {
+  success: "bg-emerald-50 border-emerald-200 text-emerald-800",
+  error: "bg-red-50 border-red-200 text-red-800",
+  info: "bg-blue-50 border-blue-200 text-blue-800",
+};
 
-interface Toast {
-  id: string;
-  message: string;
-  type: ToastType;
+const ICON_COLORS: Record<ToastType, string> = {
+  success: "text-emerald-700",
+  error: "text-red-700",
+  info: "text-blue-700",
+};
+
+function ToastIcon({ type }: { type: ToastType }) {
+  const color = ICON_COLORS[type];
+  if (type === "success") return <CheckIcon className={`w-5 h-5 shrink-0 ${color}`} />;
+  if (type === "error") return <CloseIcon className={`w-5 h-5 shrink-0 ${color}`} />;
+  return <InfoCircleIcon className={`w-5 h-5 shrink-0 ${color}`} />;
 }
 
-// Toast state management
-let toastListeners: ((toasts: Toast[]) => void)[] = [];
-let toasts: Toast[] = [];
-
-function notifyListeners() {
-  toastListeners.forEach((listener) => listener([...toasts]));
-}
-
-export function showToast(message: string, type: ToastType = "info") {
-  const id = Date.now().toString();
-  toasts = [...toasts, { id, message, type }];
-  notifyListeners();
-
-  // Auto remove after 4 seconds
-  setTimeout(() => {
-    toasts = toasts.filter((t) => t.id !== id);
-    notifyListeners();
-  }, 4000);
-}
-
-// Toast container component
 export default function ToastContainer() {
-  const [currentToasts, setCurrentToasts] = useState<Toast[]>([]);
+  const [currentToasts, setCurrentToasts] = useState<ToastItem[]>([]);
 
   useEffect(() => {
-    toastListeners.push(setCurrentToasts);
-    return () => {
-      toastListeners = toastListeners.filter((l) => l !== setCurrentToasts);
-    };
+    return subscribeToasts(setCurrentToasts);
   }, []);
 
-  if (currentToasts.length === 0) return null;
-
-  const icons = {
-    success: (
-      <svg
-        className="w-5 h-5 text-green-500"
-        fill="none"
-        stroke="currentColor"
-        viewBox="0 0 24 24"
-      >
-        <path
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          strokeWidth={2}
-          d="M5 13l4 4L19 7"
-        />
-      </svg>
-    ),
-    error: (
-      <svg
-        className="w-5 h-5 text-red-500"
-        fill="none"
-        stroke="currentColor"
-        viewBox="0 0 24 24"
-      >
-        <path
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          strokeWidth={2}
-          d="M6 18L18 6M6 6l12 12"
-        />
-      </svg>
-    ),
-    info: (
-      <svg
-        className="w-5 h-5 text-blue-500"
-        fill="none"
-        stroke="currentColor"
-        viewBox="0 0 24 24"
-      >
-        <path
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          strokeWidth={2}
-          d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-        />
-      </svg>
-    ),
-  };
-
-  const backgrounds = {
-    success: "bg-green-50 border-green-200",
-    error: "bg-red-50 border-red-200",
-    info: "bg-blue-50 border-blue-200",
-  };
-
   return (
-    <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-2">
+    <div
+      aria-live="polite"
+      aria-atomic="false"
+      className="fixed top-4 right-4 z-50 flex flex-col gap-2 max-w-sm w-full pointer-events-none px-4 sm:px-0"
+    >
       {currentToasts.map((toast) => (
         <div
           key={toast.id}
-          className={`
-            flex items-center gap-3 px-4 py-3 rounded-lg border shadow-lg
-            animate-slide-up ${backgrounds[toast.type]}
-          `}
+          role={toast.type === "error" ? "alert" : "status"}
+          className={`pointer-events-auto flex items-center gap-3 pl-4 pr-2 py-2.5 rounded-lg border shadow-lg animate-modal-in ${TONE_STYLES[toast.type]}`}
         >
-          {icons[toast.type]}
-          <p className="text-sm text-gray-700">{toast.message}</p>
+          <ToastIcon type={toast.type} />
+          <p className="text-sm font-medium text-gray-800 flex-1">
+            {toast.message}
+          </p>
+          <button
+            type="button"
+            onClick={() => dismissToast(toast.id)}
+            aria-label="Dismiss notification"
+            className="w-10 h-10 shrink-0 flex items-center justify-center rounded-md text-gray-500 hover:text-gray-800 hover:bg-black/5 transition-colors"
+          >
+            <CloseIcon className="w-4 h-4" />
+          </button>
         </div>
       ))}
     </div>
