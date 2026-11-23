@@ -40,24 +40,6 @@ export interface College {
   updated_at: string;
 }
 
-export interface EvaluationSession {
-  id: string;
-  session_token: string;
-  college_id: string | null;
-  started_at: string;
-  completed_at: string | null;
-  is_complete: boolean;
-}
-
-export interface Response {
-  id: string;
-  session_id: string;
-  question_id: string;
-  status: ComplianceStatus;
-  comment: string | null;
-  created_at: string;
-}
-
 // Form types for creating/updating
 export interface AreaFormData {
   area_number: number;
@@ -79,12 +61,4 @@ export interface ResponseFormData {
   question_id: string;
   status: ComplianceStatus;
   comment?: string;
-}
-
-export interface CollegeAccountFormData {
-  name: string;
-  code: string;
-  email: string;
-  password: string;
-  avatar_url?: string;
 }

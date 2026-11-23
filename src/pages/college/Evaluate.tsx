@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
-import { v4 as uuidv4 } from "uuid";
 import { supabase } from "../../lib/supabase";
 import { useAuth } from "../../context/AuthContext";
 import type {
@@ -512,7 +511,7 @@ export default function CollegeEvaluate() {
       }
 
       // Create new session
-      const sessionToken = uuidv4();
+      const sessionToken = crypto.randomUUID();
       const { data: sessionData, error: sessionError } = await supabase
         .from("evaluation_sessions")
         .insert({
