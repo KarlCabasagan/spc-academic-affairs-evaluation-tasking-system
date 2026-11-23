@@ -5,3 +5,4 @@ export { default as Textarea } from "./Textarea";
 export { default as Loading, Skeleton, CardSkeleton } from "./Loading";
 export { default as Modal, ConfirmDialog } from "./Modal";
 export { default as ToastContainer, showToast } from "./Toast";
+export * from "./Icons";
