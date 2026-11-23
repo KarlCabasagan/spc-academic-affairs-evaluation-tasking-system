@@ -170,7 +170,7 @@ export default function Login() {
                   onClick={() => setShowPassword((prev) => !prev)}
                   aria-label={showPassword ? "Hide password" : "Show password"}
                   aria-pressed={showPassword}
-                  className="absolute right-1 top-1/2 -translate-y-1/2 w-10 h-10 flex items-center justify-center rounded-md text-white/80 hover:text-white transition-colors"
+                  className="absolute right-0.5 top-1/2 -translate-y-1/2 w-11 h-11 flex items-center justify-center rounded-md text-white/80 hover:text-white transition-colors"
                 >
                   {showPassword ? <EyeOffIcon /> : <EyeIcon />}
                 </button>
@@ -180,7 +180,7 @@ export default function Login() {
             <div className="flex justify-end">
               <Link
                 to="/forgot-password"
-                className="text-sm text-maroon-100 hover:text-white hover:underline py-2 px-1 transition-colors"
+                className="min-h-11 inline-flex items-center text-sm text-maroon-100 hover:text-white hover:underline px-2 rounded-md focus:outline-none focus-visible:ring-2 focus-visible:ring-white transition-colors"
               >
                 Forgot password?
               </Link>
