@@ -1,18 +1,36 @@
-import { useEffect, useState } from "react";
-import type { FormEvent } from "react";
-import { useParams, Link } from "react-router-dom";
-import { supabase } from "../../lib/supabase";
-import { useAuth } from "../../context/useAuth";
-import type { Area, Question, QuestionFormData } from "../../lib/types";
+import { useCallback, useEffect, useId, useMemo, useState, type FormEvent } from "react";
+import { Link, useParams } from "react-router-dom";
 import {
+  AlertTriangleIcon,
+  ArrowLeftIcon,
   Button,
+  buttonVariants,
   Card,
-  Input,
-  Modal,
+  ChevronRightIcon,
   ConfirmDialog,
+  EditIcon,
+  EyeIcon,
+  EyeOffIcon,
+  InfoCircleIcon,
+  Input,
   Loading,
+  Modal,
+  PlusIcon,
   showToast,
+  Textarea,
+  TrashIcon,
 } from "../../components/ui";
+import { useAuth } from "../../context/useAuth";
+import {
+  buildQuestionTree,
+  collectAncestorIds,
+  collectDescendantIds,
+  flattenQuestionTree,
+  getLeafQuestions,
+  type TreeQuestionNode,
+} from "../../lib/questionTree";
+import { supabase, supabaseNoPersist } from "../../lib/supabase";
+import type { Area, Question, QuestionFormData } from "../../lib/types";
 
 interface CollegeWithResponses {
   id: string;
@@ -20,305 +38,203 @@ interface CollegeWithResponses {
   code: string | null;
 }
 
-// Build hierarchical tree from flat question array
-function buildQuestionTree(questions: Question[]): Question[] {
-  const questionMap = new Map<string, Question>();
-  const roots: Question[] = [];
-
-  // Initialize all questions in map with empty children
-  questions.forEach((q) => {
-    questionMap.set(q.id, { ...q, children: [] });
-  });
-
-  // Build tree structure
-  questions.forEach((q) => {
-    const question = questionMap.get(q.id)!;
-    if (q.parent_id && questionMap.has(q.parent_id)) {
-      const parent = questionMap.get(q.parent_id)!;
-      parent.children = parent.children || [];
-      parent.children.push(question);
-    } else {
-      roots.push(question);
-    }
-  });
-
-  // Sort children by question_order
-  const sortChildren = (items: Question[]) => {
-    items.sort((a, b) => a.question_order - b.question_order);
-    items.forEach((item) => {
-      if (item.children && item.children.length > 0) {
-        sortChildren(item.children);
-      }
-    });
-  };
-  sortChildren(roots);
-
-  // Assign hierarchical numbers
-  const assignNumbers = (items: Question[], prefix: string = "") => {
-    items.forEach((item, index) => {
-      const num = prefix ? `${prefix}.${index + 1}` : `${index + 1}`;
-      item.hierarchical_number = num;
-      if (item.children && item.children.length > 0) {
-        assignNumbers(item.children, num);
-      }
-    });
-  };
-  assignNumbers(roots);
-
-  return roots;
+interface JoinedResponseRow {
+  evaluation_sessions: {
+    colleges: CollegeWithResponses | null;
+  } | null;
 }
 
-// Get all questions as flat list with hierarchy info for parent selector
-function getFlatQuestionsForSelector(
-  questions: Question[],
-  excludeId?: string
-): { id: string; label: string }[] {
-  const result: { id: string; label: string }[] = [];
-  const addToResult = (items: Question[], depth: number = 0) => {
-    items.forEach((item) => {
-      if (item.id !== excludeId) {
-        result.push({
-          id: item.id,
-          label: `${"─".repeat(depth)} ${
-            item.hierarchical_number
-          } ${item.question_text.substring(0, 50)}${
-            item.question_text.length > 50 ? "..." : ""
-          }`,
-        });
-        if (item.children && item.children.length > 0) {
-          addToResult(item.children, depth + 1);
-        }
-      }
-    });
-  };
-  addToResult(questions);
-  return result;
+function chunkIds(ids: readonly string[], chunkSize = 50): string[][] {
+  const chunks: string[][] = [];
+  for (let i = 0; i < ids.length; i += chunkSize) {
+    chunks.push(ids.slice(i, i + chunkSize));
+  }
+  return chunks;
 }
 
-// Get next order number for a given parent
 function getNextOrderNumber(
-  questions: Question[],
-  parentId: string | null
+  questions: readonly Question[],
+  parentId: string | null,
 ): number {
   const siblings = questions.filter((q) => q.parent_id === parentId);
   if (siblings.length === 0) return 1;
   return Math.max(...siblings.map((q) => q.question_order)) + 1;
 }
 
-// Get indentation style based on depth (max 4 levels visually)
+function collectParentNodeIds(
+  nodes: readonly TreeQuestionNode<Question>[],
+): Set<string> {
+  const result = new Set<string>();
+  const walk = (items: readonly TreeQuestionNode<Question>[]) => {
+    items.forEach((item) => {
+      if (item.children.length > 0) {
+        result.add(item.id);
+        walk(item.children);
+      }
+    });
+  };
+  walk(nodes);
+  return result;
+}
 
-// Recursive question item component
 interface QuestionItemProps {
-  question: Question;
-  depth: number;
+  question: TreeQuestionNode<Question>;
   expandedIds: Set<string>;
+  togglingIds: Set<string>;
+  checkingDeleteId: string | null;
   onToggleExpand: (id: string) => void;
-  onEdit: (question: Question) => void;
-  onDelete: (question: Question) => void;
-  onToggleActive: (question: Question) => void;
+  onEdit: (question: TreeQuestionNode<Question>) => void;
+  onDelete: (question: TreeQuestionNode<Question>) => void;
+  onToggleActive: (question: TreeQuestionNode<Question>) => void;
   onAddSubQuestion: (parentId: string) => void;
 }
 
 function QuestionItem({
   question,
-  depth,
   expandedIds,
+  togglingIds,
+  checkingDeleteId,
   onToggleExpand,
   onEdit,
   onDelete,
   onToggleActive,
   onAddSubQuestion,
 }: QuestionItemProps) {
-  const hasChildren = question.children && question.children.length > 0;
+  const hasChildren = question.children.length > 0;
   const isExpanded = expandedIds.has(question.id);
-
-  // Calculate indentation (max 4 levels to prevent overflow)
-  const indentPx = Math.min(depth, 4) * 24;
+  const isToggling = togglingIds.has(question.id);
+  const isChecking = checkingDeleteId === question.id;
 
   return (
-    <div className="relative">
-      {/* Vertical connector line for nested items */}
-      {depth > 0 && (
-        <div
-          className="absolute top-0 bottom-0 border-l-2 border-maroon-200"
-          style={{ left: `${indentPx - 12}px` }}
-        />
-      )}
-
-      <Card
-        className="flex flex-col sm:flex-row sm:items-start gap-4 transition-all duration-200 relative"
-        style={{ marginLeft: `${indentPx}px` }}
-      >
-        {/* Expand/Collapse Toggle for parents */}
-        {hasChildren && (
-          <button
-            onClick={() => onToggleExpand(question.id)}
-            className="absolute -left-3 top-4 w-6 h-6 bg-white border-2 border-maroon-300 rounded-full flex items-center justify-center hover:bg-maroon-50 transition-colors z-10"
-            title={isExpanded ? "Collapse" : "Expand"}
-          >
-            <svg
-              className={`w-3 h-3 text-maroon-600 transition-transform duration-200 ${
-                isExpanded ? "rotate-90" : ""
-              }`}
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
+    <div>
+      <Card className="flex flex-col sm:flex-row sm:items-start gap-3 sm:gap-4 p-4 sm:p-5">
+        <div className="flex items-start gap-2.5 flex-1 min-w-0">
+          {hasChildren && (
+            <button
+              type="button"
+              onClick={() => onToggleExpand(question.id)}
+              aria-expanded={isExpanded}
+              aria-label={
+                isExpanded
+                  ? `Collapse sub-questions for item ${question.hierarchical_number}`
+                  : `Expand sub-questions for item ${question.hierarchical_number}`
+              }
+              className="w-11 h-11 -ml-2 -mt-1.5 inline-flex items-center justify-center rounded-lg text-gray-600 hover:bg-gray-100 hover:text-maroon-800 active:scale-[0.97] transition-[background-color,color,transform] duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-maroon-800 shrink-0"
             >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={3}
-                d="M9 5l7 7-7 7"
+              <ChevronRightIcon
+                className={`w-4 h-4 transition-transform duration-150 ease-out ${
+                  isExpanded ? "rotate-90" : ""
+                }`}
               />
-            </svg>
-          </button>
-        )}
+            </button>
+          )}
 
-        <div
-          className={`
-          shrink-0 px-3 py-1 rounded-lg text-sm font-medium
-          ${
-            question.is_active
-              ? "bg-maroon-100 text-maroon-800"
-              : "bg-gray-100 text-gray-400"
-          }
-        `}
-        >
-          {question.hierarchical_number}
-        </div>
-        <div className="flex-1 min-w-0">
-          <p
-            className={`font-medium ${
-              question.is_active ? "text-gray-900" : "text-gray-400"
+          <span
+            className={`shrink-0 px-2.5 py-1 rounded-lg text-sm font-semibold tabular-nums ${
+              question.is_active
+                ? "bg-maroon-100 text-maroon-800"
+                : "bg-gray-100 text-gray-500"
             }`}
           >
-            {question.question_text}
-          </p>
-          <div className="flex flex-wrap items-center gap-2 mt-2">
-            {hasChildren && (
-              <span className="px-2 py-0.5 bg-blue-50 text-blue-600 text-xs rounded-full">
-                {question.children!.length} sub-question
-                {question.children!.length > 1 ? "s" : ""}
-                {!isExpanded && " (collapsed)"}
-              </span>
-            )}
-            {question.is_required && (
-              <span className="px-2 py-0.5 bg-red-50 text-red-600 text-xs rounded-full">
-                Required
-              </span>
-            )}
-            {!question.is_active && (
-              <span className="px-2 py-0.5 bg-gray-100 text-gray-500 text-xs rounded-full">
-                Inactive
-              </span>
-            )}
+            {question.hierarchical_number}
+          </span>
+
+          <div className="flex-1 min-w-0">
+            <p
+              className={`font-medium leading-relaxed max-w-prose ${
+                question.is_active ? "text-gray-900" : "text-gray-500"
+              }`}
+            >
+              {question.question_text}
+            </p>
+            <div className="flex flex-wrap items-center gap-2 mt-2">
+              {hasChildren && (
+                <span className="px-2 py-0.5 bg-blue-50 text-blue-800 text-xs font-medium rounded-full tabular-nums">
+                  {question.children.length} sub-question
+                  {question.children.length === 1 ? "" : "s"}
+                  {!isExpanded ? " (collapsed)" : ""}
+                </span>
+              )}
+              {question.is_required && (
+                <span className="px-2 py-0.5 bg-amber-50 text-amber-800 text-xs font-medium rounded-full border border-amber-200">
+                  Required
+                </span>
+              )}
+              {!question.is_active && (
+                <span className="px-2 py-0.5 bg-gray-100 text-gray-700 text-xs font-medium rounded-full">
+                  Inactive
+                </span>
+              )}
+            </div>
           </div>
         </div>
 
-        <div className="flex items-center gap-1 shrink-0">
+        <div className="flex flex-wrap items-center gap-1 shrink-0 sm:mt-0">
           <Button
+            type="button"
             variant="ghost"
             size="sm"
             onClick={() => onAddSubQuestion(question.id)}
-            title="Add Sub-question"
+            aria-label={`Add sub-question under ${question.hierarchical_number}`}
+            className="w-11 h-11 p-0 text-blue-700 hover:bg-blue-50"
           >
-            <svg
-              className="w-4 h-4 text-blue-600"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M12 4v16m8-8H4"
-              />
-            </svg>
+            <PlusIcon className="w-4 h-4" />
           </Button>
           <Button
+            type="button"
             variant="ghost"
             size="sm"
             onClick={() => onToggleActive(question)}
+            isLoading={isToggling}
+            disabled={isToggling}
+            aria-pressed={question.is_active}
+            aria-label={
+              question.is_active
+                ? `Deactivate item ${question.hierarchical_number}`
+                : `Activate item ${question.hierarchical_number}`
+            }
+            className="w-11 h-11 p-0"
           >
             {question.is_active ? (
-              <svg
-                className="w-4 h-4 text-gray-500"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.878 9.878L3 3m6.879 6.879L21 21"
-                />
-              </svg>
+              <EyeOffIcon className="w-4 h-4 text-gray-600" />
             ) : (
-              <svg
-                className="w-4 h-4 text-green-600"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
-                />
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"
-                />
-              </svg>
+              <EyeIcon className="w-4 h-4 text-emerald-700" />
             )}
           </Button>
-          <Button variant="ghost" size="sm" onClick={() => onEdit(question)}>
-            <svg
-              className="w-4 h-4"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
-              />
-            </svg>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => onEdit(question)}
+            aria-label={`Edit item ${question.hierarchical_number}`}
+            className="w-11 h-11 p-0"
+          >
+            <EditIcon className="w-4 h-4 text-gray-700" />
           </Button>
-          <Button variant="ghost" size="sm" onClick={() => onDelete(question)}>
-            <svg
-              className="w-4 h-4 text-red-500"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
-              />
-            </svg>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => onDelete(question)}
+            isLoading={isChecking}
+            disabled={checkingDeleteId !== null}
+            aria-label={`Delete item ${question.hierarchical_number}`}
+            className="w-11 h-11 p-0 text-red-700 hover:bg-red-50"
+          >
+            <TrashIcon className="w-4 h-4" />
           </Button>
         </div>
       </Card>
 
-      {/* Render children recursively (with collapse animation) */}
       {hasChildren && isExpanded && (
-        <div className="space-y-2 mt-2">
-          {question.children!.map((child) => (
+        <div className="mt-2 ml-3 sm:ml-6 border-l-2 border-maroon-200 pl-3 sm:pl-4 space-y-2">
+          {question.children.map((child) => (
             <QuestionItem
               key={child.id}
               question={child}
-              depth={depth + 1}
               expandedIds={expandedIds}
+              togglingIds={togglingIds}
+              checkingDeleteId={checkingDeleteId}
               onToggleExpand={onToggleExpand}
               onEdit={onEdit}
               onDelete={onDelete}
@@ -335,33 +251,33 @@ function QuestionItem({
 export default function Questions() {
   const { areaId } = useParams<{ areaId: string }>();
   const { user } = useAuth();
+  const parentSelectId = useId();
 
   const [area, setArea] = useState<Area | null>(null);
   const [questions, setQuestions] = useState<Question[]>([]);
-  const [questionTree, setQuestionTree] = useState<Question[]>([]);
+  const [questionTree, setQuestionTree] = useState<
+    TreeQuestionNode<Question>[]
+  >([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isDeleteOpen, setIsDeleteOpen] = useState(false);
-  const [selectedQuestion, setSelectedQuestion] = useState<Question | null>(
-    null
-  );
+  const [selectedQuestion, setSelectedQuestion] =
+    useState<TreeQuestionNode<Question> | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [checkingDeleteId, setCheckingDeleteId] = useState<string | null>(null);
+  const [togglingIds, setTogglingIds] = useState<Set<string>>(() => new Set());
 
-  // Clear all questions modal state
   const [showClearAllModal, setShowClearAllModal] = useState(false);
   const [clearAllPassword, setClearAllPassword] = useState("");
   const [isClearingAll, setIsClearingAll] = useState(false);
 
-  // Response warning state
   const [collegesWithResponses, setCollegesWithResponses] = useState<
     CollegeWithResponses[]
   >([]);
   const [showResponseWarning, setShowResponseWarning] = useState(false);
 
-  // Expand/collapse state - default all expanded
-  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set());
 
-  // Form state
   const [formData, setFormData] = useState<QuestionFormData>({
     area_id: areaId || "",
     parent_id: null,
@@ -370,80 +286,87 @@ export default function Questions() {
     is_required: true,
   });
 
-  useEffect(() => {
-    if (areaId) {
-      fetchData();
-    }
-  }, [areaId]);
+  const fetchData = useCallback(async () => {
+    if (!areaId) return;
 
-  const fetchData = async () => {
     try {
-      // Fetch area
-      const { data: areaData, error: areaError } = await supabase
-        .from("areas")
-        .select("*")
-        .eq("id", areaId)
-        .single();
+      const [areaRes, questionsRes] = await Promise.all([
+        supabase.from("areas").select("*").eq("id", areaId).single(),
+        supabase
+          .from("questions")
+          .select("*")
+          .eq("area_id", areaId)
+          .order("question_order", { ascending: true }),
+      ]);
 
-      if (areaError) throw areaError;
-      setArea(areaData);
+      if (areaRes.error) throw areaRes.error;
+      if (questionsRes.error) throw questionsRes.error;
 
-      // Fetch questions
-      const { data: questionsData, error: questionsError } = await supabase
-        .from("questions")
-        .select("*")
-        .eq("area_id", areaId)
-        .order("question_order", { ascending: true });
+      const qRows = (questionsRes.data || []) as Question[];
+      const tree = buildQuestionTree(qRows);
 
-      if (questionsError) throw questionsError;
-      setQuestions(questionsData || []);
-      const tree = buildQuestionTree(questionsData || []);
+      setArea(areaRes.data as Area);
+      setQuestions(qRows);
       setQuestionTree(tree);
-
-      // Initialize all parent questions as expanded
-      const allParentIds = new Set<string>();
-      const findParents = (items: Question[]) => {
-        items.forEach((item) => {
-          if (item.children && item.children.length > 0) {
-            allParentIds.add(item.id);
-            findParents(item.children);
-          }
-        });
-      };
-      findParents(tree);
-      setExpandedIds(allParentIds);
-    } catch (error) {
-      console.error("Error fetching data:", error);
-      showToast("Failed to load data", "error");
+      setExpandedIds(collectParentNodeIds(tree));
+    } catch {
+      showToast("Failed to load evaluation questions.", "error");
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [areaId]);
+
+  useEffect(() => {
+    void fetchData();
+  }, [fetchData]);
+
+  const activeLeafCount = useMemo(
+    () =>
+      getLeafQuestions(
+        buildQuestionTree(questions.filter((q) => q.is_active)),
+      ).length,
+    [questions],
+  );
+
+  const parentOptions = useMemo(() => {
+    const excludedIds = selectedQuestion
+      ? new Set(collectDescendantIds(questions, selectedQuestion.id))
+      : new Set<string>();
+
+    return flattenQuestionTree(questionTree)
+      .filter(({ node }) => !excludedIds.has(node.id))
+      .map(({ node, depth }) => {
+        const prefix = depth > 0 ? `${"─".repeat(depth)} ` : "";
+        const snippet =
+          node.question_text.length > 50
+            ? `${node.question_text.slice(0, 50)}…`
+            : node.question_text;
+        return {
+          id: node.id,
+          label: `${prefix}${node.hierarchical_number} ${snippet}`,
+        };
+      });
+  }, [questionTree, questions, selectedQuestion]);
+
+  const hasAnyParents = useMemo(
+    () => questionTree.some((q) => q.children.length > 0),
+    [questionTree],
+  );
 
   const toggleExpand = (id: string) => {
     setExpandedIds((prev) => {
-      const newSet = new Set(prev);
-      if (newSet.has(id)) {
-        newSet.delete(id);
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
       } else {
-        newSet.add(id);
+        next.add(id);
       }
-      return newSet;
+      return next;
     });
   };
 
   const expandAll = () => {
-    const allParentIds = new Set<string>();
-    const findParents = (items: Question[]) => {
-      items.forEach((item) => {
-        if (item.children && item.children.length > 0) {
-          allParentIds.add(item.id);
-          findParents(item.children);
-        }
-      });
-    };
-    findParents(questionTree);
-    setExpandedIds(allParentIds);
+    setExpandedIds(collectParentNodeIds(questionTree));
   };
 
   const collapseAll = () => {
@@ -462,7 +385,7 @@ export default function Questions() {
     setIsModalOpen(true);
   };
 
-  const openEditModal = (question: Question) => {
+  const openEditModal = (question: TreeQuestionNode<Question>) => {
     setSelectedQuestion(question);
     setFormData({
       area_id: question.area_id,
@@ -474,58 +397,29 @@ export default function Questions() {
     setIsModalOpen(true);
   };
 
-  // Check if a question (and its children) has any responses
   const checkQuestionResponses = async (
-    questionId: string
+    questionId: string,
   ): Promise<CollegeWithResponses[]> => {
-    try {
-      // Get all descendant question IDs (including this question)
-      const getAllDescendantIds = (qId: string): string[] => {
-        const ids = [qId];
-        const findChildren = (items: Question[], targetId: string) => {
-          items.forEach((item) => {
-            if (item.id === targetId && item.children) {
-              item.children.forEach((child) => {
-                ids.push(child.id);
-                findChildren(questionTree, child.id);
-              });
-            } else if (item.children) {
-              findChildren(item.children, targetId);
-            }
-          });
-        };
-        findChildren(questionTree, qId);
-        return ids;
-      };
+    const questionIds = collectDescendantIds(questions, questionId);
+    const collegeMap = new Map<string, CollegeWithResponses>();
 
-      const questionIds = getAllDescendantIds(questionId);
-
-      // Get all responses for these questions
-      const { data: responses, error: responsesError } = await supabase
+    for (const batch of chunkIds(questionIds, 50)) {
+      const { data, error } = await supabase
         .from("responses")
         .select(
           `
-          id,
-          session_id,
-          evaluation_sessions!inner (
-            college_id,
-            colleges!inner (
-              id,
-              name,
-              code
+            id,
+            evaluation_sessions!inner(
+              colleges!inner(id, name, code)
             )
-          )
-        `
+          `,
         )
-        .in("question_id", questionIds);
+        .in("question_id", batch);
 
-      if (responsesError) throw responsesError;
-      if (!responses || responses.length === 0) return [];
+      if (error) throw error;
 
-      // Extract unique colleges
-      const collegeMap = new Map<string, CollegeWithResponses>();
-      responses.forEach((r: any) => {
-        const college = r.evaluation_sessions?.colleges;
+      (data as unknown as JoinedResponseRow[] | null)?.forEach((row) => {
+        const college = row.evaluation_sessions?.colleges;
         if (college && !collegeMap.has(college.id)) {
           collegeMap.set(college.id, {
             id: college.id,
@@ -534,40 +428,55 @@ export default function Questions() {
           });
         }
       });
-
-      return Array.from(collegeMap.values());
-    } catch (error) {
-      console.error("Error checking question responses:", error);
-      return [];
     }
+
+    return Array.from(collegeMap.values());
   };
 
-  const openDeleteDialog = async (question: Question) => {
+  const openDeleteDialog = async (question: TreeQuestionNode<Question>) => {
+    if (checkingDeleteId) return;
+    setCheckingDeleteId(question.id);
     setSelectedQuestion(question);
 
-    // Check for responses before opening delete dialog
-    const colleges = await checkQuestionResponses(question.id);
-    setCollegesWithResponses(colleges);
+    try {
+      const colleges = await checkQuestionResponses(question.id);
+      setCollegesWithResponses(colleges);
 
-    if (colleges.length > 0) {
-      setShowResponseWarning(true);
-    } else {
-      setIsDeleteOpen(true);
+      if (colleges.length > 0) {
+        setShowResponseWarning(true);
+      } else {
+        setIsDeleteOpen(true);
+      }
+    } catch {
+      showToast(
+        "Failed to verify existing responses for this question. Deletion was cancelled.",
+        "error",
+      );
+      setSelectedQuestion(null);
+    } finally {
+      setCheckingDeleteId(null);
     }
   };
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
 
+    if (
+      !Number.isInteger(formData.question_order) ||
+      formData.question_order < 1
+    ) {
+      showToast("Order number must be at least 1.", "error");
+      return;
+    }
+
     if (!formData.question_text.trim()) {
-      showToast("Please enter question text", "error");
+      showToast("Please enter question text.", "error");
       return;
     }
 
     setIsSubmitting(true);
     try {
       if (selectedQuestion) {
-        // Update
         const { error } = await supabase
           .from("questions")
           .update({
@@ -579,9 +488,8 @@ export default function Questions() {
           .eq("id", selectedQuestion.id);
 
         if (error) throw error;
-        showToast("Question updated successfully", "success");
+        showToast("Question updated successfully.", "success");
       } else {
-        // Create
         const { error } = await supabase.from("questions").insert({
           area_id: areaId,
           parent_id: formData.parent_id || null,
@@ -591,21 +499,20 @@ export default function Questions() {
         });
 
         if (error) throw error;
-        showToast("Question created successfully", "success");
+        showToast("Question created successfully.", "success");
       }
 
       setIsModalOpen(false);
-      fetchData();
-    } catch (error) {
-      console.error("Error saving question:", error);
-      showToast("Failed to save question", "error");
+      await fetchData();
+    } catch {
+      showToast("Failed to save question.", "error");
     } finally {
       setIsSubmitting(false);
     }
   };
 
   const handleDelete = async () => {
-    if (!selectedQuestion) return;
+    if (!selectedQuestion || isSubmitting) return;
 
     setIsSubmitting(true);
     try {
@@ -615,56 +522,44 @@ export default function Questions() {
         .eq("id", selectedQuestion.id);
 
       if (error) throw error;
-      showToast("Question deleted successfully", "success");
+      showToast("Question deleted successfully.", "success");
       setIsDeleteOpen(false);
       setShowResponseWarning(false);
-      fetchData();
-    } catch (error) {
-      console.error("Error deleting question:", error);
-      showToast("Failed to delete question", "error");
+      setCollegesWithResponses([]);
+      await fetchData();
+    } catch {
+      showToast("Failed to delete question.", "error");
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  const handleClearAllQuestions = async () => {
+  const handleClearAllQuestions = async (e: FormEvent) => {
+    e.preventDefault();
     if (!user?.email || !areaId) {
-      showToast("Unable to clear questions", "error");
+      showToast("Unable to clear questions.", "error");
       return;
     }
 
     if (!clearAllPassword.trim()) {
-      showToast("Please enter your password", "error");
+      showToast("Please enter your password.", "error");
       return;
     }
 
     setIsClearingAll(true);
     try {
-      // Verify admin password
-      const { error: authError } = await supabase.auth.signInWithPassword({
-        email: user.email,
-        password: clearAllPassword,
-      });
+      const { error: authError } =
+        await supabaseNoPersist.auth.signInWithPassword({
+          email: user.email,
+          password: clearAllPassword,
+        });
 
       if (authError) {
         showToast("Invalid password. Please try again.", "error");
         return;
       }
 
-      // Get all question IDs in this area
-      const questionIds = questions.map((q) => q.id);
-
-      if (questionIds.length > 0) {
-        // Delete all responses for these questions first
-        const { error: responsesError } = await supabase
-          .from("responses")
-          .delete()
-          .in("question_id", questionIds);
-
-        if (responsesError) throw responsesError;
-      }
-
-      // Delete all questions in this area
+      // ON DELETE CASCADE on responses(question_id) cleans child responses safely without URL-length overflow
       const { error: questionsError } = await supabase
         .from("questions")
         .delete()
@@ -672,84 +567,72 @@ export default function Questions() {
 
       if (questionsError) throw questionsError;
 
-      showToast("All questions have been cleared", "success");
+      showToast("All questions in this area have been cleared.", "success");
       setShowClearAllModal(false);
       setClearAllPassword("");
-      fetchData();
-    } catch (error) {
-      console.error("Error clearing questions:", error);
+      await fetchData();
+    } catch {
       showToast("Failed to clear questions. Please try again.", "error");
     } finally {
       setIsClearingAll(false);
     }
   };
 
-  const toggleActive = async (question: Question) => {
+  const toggleActive = async (question: TreeQuestionNode<Question>) => {
+    if (togglingIds.has(question.id)) return;
+    setTogglingIds((prev) => new Set(prev).add(question.id));
+
     try {
-      // Get all descendant IDs including the question itself
-      const getAllDescendantIds = (q: Question): string[] => {
-        const ids = [q.id];
-        if (q.children?.length) {
-          q.children.forEach((child) => {
-            ids.push(...getAllDescendantIds(child));
-          });
-        }
-        return ids;
-      };
-
-      const questionIds = getAllDescendantIds(question);
       const newStatus = !question.is_active;
+      const descendantIds = collectDescendantIds(questions, question.id);
+      const ancestorIds = newStatus
+        ? collectAncestorIds(questions, question.id)
+        : [];
+      const inactiveAncestorCount = ancestorIds.filter((id) => {
+        const row = questions.find((q) => q.id === id);
+        return row ? !row.is_active : false;
+      }).length;
 
-      const { error } = await supabase
-        .from("questions")
-        .update({ is_active: newStatus })
-        .in("id", questionIds);
+      const idsToUpdate = Array.from(
+        new Set([...descendantIds, ...ancestorIds]),
+      );
 
-      if (error) throw error;
+      for (const batch of chunkIds(idsToUpdate, 50)) {
+        const { error } = await supabase
+          .from("questions")
+          .update({ is_active: newStatus })
+          .in("id", batch);
 
-      const childCount = questionIds.length - 1;
-      const message =
+        if (error) throw error;
+      }
+
+      const childCount = descendantIds.length - 1;
+      let message =
         childCount > 0
-          ? `Question and ${childCount} sub-question${
-              childCount > 1 ? "s" : ""
-            } ${newStatus ? "activated" : "deactivated"}`
-          : `Question ${newStatus ? "activated" : "deactivated"}`;
+          ? `Question and ${childCount} sub-question${childCount > 1 ? "s" : ""} ${newStatus ? "activated" : "deactivated"}.`
+          : `Question ${newStatus ? "activated" : "deactivated"}.`;
+
+      if (inactiveAncestorCount > 0) {
+        message = `Question reactivated along with ${inactiveAncestorCount} parent group${inactiveAncestorCount > 1 ? "s" : ""}.`;
+      }
 
       showToast(message, "success");
-      fetchData();
-    } catch (error) {
-      console.error("Error toggling question:", error);
-      showToast("Failed to update question status", "error");
+      await fetchData();
+    } catch {
+      showToast("Failed to update question status.", "error");
+    } finally {
+      setTogglingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(question.id);
+        return next;
+      });
     }
-  };
-
-  // Count only leaf questions (terminal nodes without children - these are answerable)
-  const getLeafCount = (items: Question[]): number => {
-    return items.reduce((count, item) => {
-      if (item.children && item.children.length > 0) {
-        // This is a parent node - don't count it, but count its children
-        return count + getLeafCount(item.children);
-      } else {
-        // This is a leaf node - count it
-        return count + 1;
-      }
-    }, 0);
-  };
-
-  // Check if there are any parent questions (for showing expand/collapse all)
-  const hasAnyParents = questionTree.some(
-    (q) => q.children && q.children.length > 0
-  );
-
-  // Get parent question options for selector
-  const getParentOptions = () => {
-    return getFlatQuestionsForSelector(questionTree, selectedQuestion?.id);
   };
 
   if (isLoading) {
     return (
       <div className="flex items-center justify-center py-16">
-        <Loading size="lg" text="Loading questions..." />
+        <Loading size="lg" text="Loading questions…" />
       </div>
     );
   }
@@ -757,11 +640,11 @@ export default function Questions() {
   if (!area) {
     return (
       <div className="text-center py-16">
-        <h2 className="text-xl font-semibold text-gray-900 mb-4">
+        <h1 className="text-xl font-semibold text-gray-900 mb-4">
           Area not found
-        </h2>
-        <Link to="/admin/areas">
-          <Button>Back to Areas</Button>
+        </h1>
+        <Link to="/admin/areas" className={buttonVariants({ variant: "primary" })}>
+          Back to Areas
         </Link>
       </div>
     );
@@ -773,111 +656,63 @@ export default function Questions() {
       <div className="mb-8">
         <Link
           to="/admin/areas"
-          className="inline-flex items-center gap-2 text-gray-500 hover:text-maroon-800 transition-colors mb-4"
+          className="inline-flex items-center gap-2 min-h-11 -ml-2 px-2 rounded-lg text-gray-600 hover:text-maroon-800 transition-colors duration-150 mb-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-maroon-800"
         >
-          <svg
-            className="w-4 h-4"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={2}
-              d="M15 19l-7-7 7-7"
-            />
-          </svg>
+          <ArrowLeftIcon className="w-4 h-4" />
           Back to Areas
         </Link>
+
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-          <div className="flex items-center gap-4">
-            <div className="w-12 h-12 bg-maroon-100 text-maroon-800 rounded-xl flex items-center justify-center font-bold text-lg">
+          <div className="flex items-center gap-4 min-w-0">
+            <div className="w-12 h-12 bg-maroon-100 text-maroon-800 rounded-xl flex items-center justify-center font-bold text-lg tabular-nums shrink-0">
               {area.area_number}
             </div>
-            <div>
-              <h1 className="text-2xl sm:text-3xl font-bold text-gray-900">
+            <div className="min-w-0">
+              <h1 className="text-2xl sm:text-3xl font-bold text-gray-900 truncate">
                 {area.name}
               </h1>
-              <p className="text-gray-600">
-                {getLeafCount(questionTree)} answerable question
-                {getLeafCount(questionTree) !== 1 ? "s" : ""}
+              <p className="text-gray-600 tabular-nums mt-0.5">
+                {activeLeafCount} active answerable question
+                {activeLeafCount === 1 ? "" : "s"} ({questions.length} total
+                items)
               </p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
+
+          <div className="flex flex-wrap items-center gap-2">
             {hasAnyParents && (
               <>
-                <Button variant="secondary" size="sm" onClick={expandAll}>
-                  <svg
-                    className="w-4 h-4"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={2}
-                      d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"
-                    />
-                  </svg>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={expandAll}
+                >
                   Expand All
                 </Button>
-                <Button variant="secondary" size="sm" onClick={collapseAll}>
-                  <svg
-                    className="w-4 h-4"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={2}
-                      d="M9 9V4.5M9 9H4.5M9 9L3.75 3.75M9 15v4.5M9 15H4.5M9 15l-5.25 5.25M15 9h4.5M15 9V4.5M15 9l5.25-5.25M15 15h4.5M15 15v4.5m0-4.5l5.25 5.25"
-                    />
-                  </svg>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={collapseAll}
+                >
                   Collapse All
                 </Button>
               </>
             )}
             {questionTree.length > 0 && (
               <Button
+                type="button"
                 variant="danger"
                 size="sm"
                 onClick={() => setShowClearAllModal(true)}
               >
-                <svg
-                  className="w-4 h-4"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
-                  />
-                </svg>
+                <TrashIcon className="w-4 h-4" />
                 Clear All
               </Button>
             )}
-            <Button onClick={() => openCreateModal(null)}>
-              <svg
-                className="w-5 h-5"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M12 4v16m8-8H4"
-                />
-              </svg>
+            <Button type="button" onClick={() => openCreateModal(null)}>
+              <PlusIcon className="w-5 h-5" />
               Add Question
             </Button>
           </div>
@@ -887,41 +722,31 @@ export default function Questions() {
       {/* Questions List */}
       {questionTree.length === 0 ? (
         <Card className="text-center py-12">
-          <svg
-            className="w-16 h-16 text-gray-300 mx-auto mb-4"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={2}
-              d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-            />
-          </svg>
-          <h3 className="text-lg font-medium text-gray-900 mb-2">
+          <InfoCircleIcon className="w-12 h-12 text-gray-400 mx-auto mb-3" />
+          <h2 className="text-lg font-medium text-gray-900 mb-2">
             No questions yet
-          </h3>
-          <p className="text-gray-500 mb-6">
-            Add evaluation questions for this area.
+          </h2>
+          <p className="text-gray-600 max-w-prose mx-auto mb-6">
+            Add evaluation questions and hierarchical sub-criteria for this
+            area.
           </p>
-          <Button onClick={() => openCreateModal(null)}>
+          <Button type="button" onClick={() => openCreateModal(null)}>
             Add First Question
           </Button>
         </Card>
       ) : (
-        <div className="space-y-2">
+        <div className="space-y-3">
           {questionTree.map((question) => (
             <QuestionItem
               key={question.id}
               question={question}
-              depth={0}
               expandedIds={expandedIds}
+              togglingIds={togglingIds}
+              checkingDeleteId={checkingDeleteId}
               onToggleExpand={toggleExpand}
               onEdit={openEditModal}
               onDelete={openDeleteDialog}
-              onToggleActive={toggleActive}
+              onToggleActive={(q) => void toggleActive(q)}
               onAddSubQuestion={(parentId) => openCreateModal(parentId)}
             />
           ))}
@@ -931,53 +756,61 @@ export default function Questions() {
       {/* Create/Edit Modal */}
       <Modal
         isOpen={isModalOpen}
+        preventClose={isSubmitting}
         onClose={() => setIsModalOpen(false)}
         title={selectedQuestion ? "Edit Question" : "Add Question"}
         size="lg"
         footer={
           <>
             <Button
+              type="button"
               variant="ghost"
               onClick={() => setIsModalOpen(false)}
               disabled={isSubmitting}
             >
               Cancel
             </Button>
-            <Button onClick={handleSubmit} isLoading={isSubmitting}>
-              {selectedQuestion ? "Save Changes" : "Add Question"}
+            <Button type="submit" form="question-form" isLoading={isSubmitting}>
+              {isSubmitting
+                ? "Saving…"
+                : selectedQuestion
+                  ? "Save Changes"
+                  : "Add Question"}
             </Button>
           </>
         }
       >
-        <form onSubmit={handleSubmit} className="space-y-4">
-          {/* Parent Question Selector */}
+        <form id="question-form" onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1.5">
+            <label
+              htmlFor={parentSelectId}
+              className="block text-sm font-medium text-gray-700 mb-1.5"
+            >
               Parent Question (Optional)
             </label>
             <select
-              className="w-full px-4 py-2.5 bg-white border border-gray-300 rounded-lg text-gray-900 focus:outline-none focus:ring-2 focus:ring-maroon-500 focus:border-transparent transition-colors"
+              id={parentSelectId}
+              disabled={isSubmitting}
+              className="w-full min-h-11 px-4 py-2.5 bg-white border border-gray-300 rounded-lg text-gray-900 focus:outline-none focus:ring-2 focus:ring-maroon-500 focus:border-transparent transition-colors"
               value={formData.parent_id || ""}
-              onChange={(e) =>
+              onChange={(e) => {
+                const nextParentId = e.target.value || null;
                 setFormData((prev) => ({
                   ...prev,
-                  parent_id: e.target.value || null,
-                  question_order: getNextOrderNumber(
-                    questions,
-                    e.target.value || null
-                  ),
-                }))
-              }
+                  parent_id: nextParentId,
+                  question_order: getNextOrderNumber(questions, nextParentId),
+                }));
+              }}
             >
               <option value="">No parent (root level)</option>
-              {getParentOptions().map((opt) => (
+              {parentOptions.map((opt) => (
                 <option key={opt.id} value={opt.id}>
                   {opt.label}
                 </option>
               ))}
             </select>
-            <p className="mt-1 text-xs text-gray-500">
-              Select a parent to create a sub-question
+            <p className="mt-1 text-xs text-gray-600">
+              Select a parent to create or move a sub-question
             </p>
           </div>
 
@@ -985,39 +818,37 @@ export default function Questions() {
             label="Order Number"
             type="number"
             min={1}
-            value={formData.question_order}
+            value={formData.question_order || ""}
+            onChange={(e) => {
+              const parsed = Number.parseInt(e.target.value, 10);
+              setFormData((prev) => ({
+                ...prev,
+                question_order: Number.isNaN(parsed) ? 0 : parsed,
+              }));
+            }}
+            required
+            disabled={isSubmitting}
+          />
+
+          <Textarea
+            label="Question Text"
+            placeholder="Enter the evaluation question…"
+            value={formData.question_text}
             onChange={(e) =>
               setFormData((prev) => ({
                 ...prev,
-                question_order: parseInt(e.target.value) || 1,
+                question_text: e.target.value,
               }))
             }
             required
+            disabled={isSubmitting}
           />
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1.5">
-              Question Text
-            </label>
-            <textarea
-              className="w-full px-4 py-2.5 rounded-lg border border-gray-200 transition-all duration-200
-                text-gray-900 placeholder-gray-400 resize-none
-                focus:outline-none focus:ring-2 focus:ring-offset-0 focus:border-maroon-500 focus:ring-maroon-100"
-              rows={4}
-              placeholder="Enter the evaluation question..."
-              value={formData.question_text}
-              onChange={(e) =>
-                setFormData((prev) => ({
-                  ...prev,
-                  question_text: e.target.value,
-                }))
-              }
-              required
-            />
-          </div>
-          <label className="flex items-center gap-3 cursor-pointer">
+
+          <label className="inline-flex items-center gap-3 min-h-11 cursor-pointer">
             <input
               type="checkbox"
               checked={formData.is_required}
+              disabled={isSubmitting}
               onChange={(e) =>
                 setFormData((prev) => ({
                   ...prev,
@@ -1037,10 +868,10 @@ export default function Questions() {
       <ConfirmDialog
         isOpen={isDeleteOpen}
         onClose={() => setIsDeleteOpen(false)}
-        onConfirm={handleDelete}
+        onConfirm={() => void handleDelete()}
         title="Delete Question"
         message={
-          selectedQuestion?.children && selectedQuestion.children.length > 0
+          selectedQuestion && selectedQuestion.children.length > 0
             ? `This question has ${selectedQuestion.children.length} sub-question(s) that will also be deleted. Are you sure?`
             : "Are you sure you want to delete this question? This action cannot be undone."
         }
@@ -1052,66 +883,19 @@ export default function Questions() {
       {/* Delete Warning with Responses */}
       <Modal
         isOpen={showResponseWarning}
+        preventClose={isSubmitting}
         onClose={() => {
           setShowResponseWarning(false);
           setCollegesWithResponses([]);
         }}
         title="Warning: Question Has Responses"
         size="md"
-      >
-        <div className="space-y-4">
-          <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
-            <div className="flex items-start gap-3">
-              <svg
-                className="w-5 h-5 text-amber-600 shrink-0 mt-0.5"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
-                />
-              </svg>
-              <div>
-                <h4 className="font-semibold text-amber-800">
-                  This question has responses from colleges
-                </h4>
-                <p className="text-sm text-amber-700 mt-1">
-                  Deleting this question will also permanently delete all
-                  responses from the following colleges:
-                </p>
-              </div>
-            </div>
-          </div>
-
-          <div className="bg-gray-50 rounded-lg p-4">
-            <h5 className="text-sm font-medium text-gray-700 mb-2">
-              Affected Colleges:
-            </h5>
-            <ul className="space-y-1">
-              {collegesWithResponses.map((college) => (
-                <li
-                  key={college.id}
-                  className="text-sm text-gray-600 flex items-center gap-2"
-                >
-                  <span className="w-2 h-2 bg-maroon-500 rounded-full" />
-                  {college.code ? `${college.code} - ` : ""}
-                  {college.name}
-                </li>
-              ))}
-            </ul>
-          </div>
-
-          <p className="text-sm text-gray-600">
-            Are you sure you want to delete this question and all its responses?
-          </p>
-
-          <div className="flex justify-end gap-3 pt-2">
+        footer={
+          <>
             <Button
+              type="button"
               variant="secondary"
+              disabled={isSubmitting}
               onClick={() => {
                 setShowResponseWarning(false);
                 setCollegesWithResponses([]);
@@ -1120,74 +904,75 @@ export default function Questions() {
               Cancel
             </Button>
             <Button
+              type="button"
               variant="danger"
-              onClick={handleDelete}
+              onClick={() => void handleDelete()}
               isLoading={isSubmitting}
             >
-              Delete Anyway
+              {isSubmitting ? "Deleting…" : "Delete Anyway"}
             </Button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+            <div className="flex items-start gap-3">
+              <AlertTriangleIcon className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
+              <div>
+                <h3 className="font-semibold text-amber-900">
+                  This question has responses from colleges
+                </h3>
+                <p className="text-sm text-amber-800 max-w-prose mt-1">
+                  Deleting this question will permanently delete all associated
+                  responses from the following colleges:
+                </p>
+              </div>
+            </div>
           </div>
+
+          <div className="bg-gray-50 rounded-lg p-4 border border-gray-200">
+            <h4 className="text-sm font-medium text-gray-800 mb-2">
+              Affected Colleges:
+            </h4>
+            <ul className="space-y-1">
+              {collegesWithResponses.map((college) => (
+                <li
+                  key={college.id}
+                  className="text-sm text-gray-700 flex items-center gap-2"
+                >
+                  <span
+                    className="w-2 h-2 bg-maroon-600 rounded-full shrink-0"
+                    aria-hidden="true"
+                  />
+                  {college.code ? `${college.code} - ` : ""}
+                  {college.name}
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          <p className="text-sm text-gray-700 max-w-prose">
+            Are you sure you want to delete this question and all its responses?
+          </p>
         </div>
       </Modal>
 
       {/* Clear All Questions Modal */}
       <Modal
         isOpen={showClearAllModal}
+        preventClose={isClearingAll}
         onClose={() => {
           setShowClearAllModal(false);
           setClearAllPassword("");
         }}
         title="Clear All Questions?"
         size="md"
-      >
-        <div className="space-y-4">
-          <div className="bg-red-50 border border-red-200 rounded-lg p-4">
-            <div className="flex items-start gap-3">
-              <svg
-                className="w-5 h-5 text-red-600 shrink-0 mt-0.5"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
-                />
-              </svg>
-              <div>
-                <h4 className="font-semibold text-red-800">Danger Zone</h4>
-                <p className="text-sm text-red-700 mt-1">
-                  This will <strong>permanently delete</strong>:
-                </p>
-                <ul className="text-sm text-red-700 mt-2 list-disc list-inside">
-                  <li>All {questions.length} questions in this area</li>
-                  <li>All responses for these questions</li>
-                </ul>
-                <p className="text-sm text-red-700 mt-2 font-medium">
-                  This action CANNOT be undone.
-                </p>
-              </div>
-            </div>
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Enter your password to confirm
-            </label>
-            <input
-              type="password"
-              value={clearAllPassword}
-              onChange={(e) => setClearAllPassword(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-red-500"
-              placeholder="Your admin password"
-            />
-          </div>
-
-          <div className="flex justify-end gap-3 pt-2">
+        footer={
+          <>
             <Button
+              type="button"
               variant="secondary"
+              disabled={isClearingAll}
               onClick={() => {
                 setShowClearAllModal(false);
                 setClearAllPassword("");
@@ -1196,15 +981,53 @@ export default function Questions() {
               Cancel
             </Button>
             <Button
+              type="submit"
+              form="clear-questions-form"
               variant="danger"
-              onClick={handleClearAllQuestions}
               isLoading={isClearingAll}
               disabled={!clearAllPassword.trim()}
             >
-              Clear All Questions
+              {isClearingAll ? "Clearing…" : "Clear All Questions"}
             </Button>
+          </>
+        }
+      >
+        <form
+          id="clear-questions-form"
+          onSubmit={handleClearAllQuestions}
+          className="space-y-4"
+        >
+          <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+            <div className="flex items-start gap-3">
+              <AlertTriangleIcon className="w-5 h-5 text-red-700 shrink-0 mt-0.5" />
+              <div>
+                <h3 className="font-semibold text-red-900">Danger Zone</h3>
+                <p className="text-sm text-red-800 max-w-prose mt-1">
+                  This will <strong>permanently delete</strong>:
+                </p>
+                <ul className="text-sm text-red-800 mt-2 list-disc list-inside tabular-nums space-y-0.5">
+                  <li>All {questions.length} questions in this area</li>
+                  <li>All recorded responses for these questions</li>
+                </ul>
+                <p className="text-sm text-red-800 mt-2 font-medium">
+                  This action cannot be undone.
+                </p>
+              </div>
+            </div>
           </div>
-        </div>
+
+          <Input
+            label="Enter your password to confirm"
+            type="password"
+            value={clearAllPassword}
+            onChange={(e) => setClearAllPassword(e.target.value)}
+            placeholder="Your admin password"
+            autoComplete="current-password"
+            showPasswordToggle
+            required
+            disabled={isClearingAll}
+          />
+        </form>
       </Modal>
     </div>
   );
