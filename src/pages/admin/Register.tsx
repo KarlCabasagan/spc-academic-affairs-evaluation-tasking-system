@@ -1,54 +1,99 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useId } from "react";
 import type { FormEvent } from "react";
 import { Navigate, Link } from "react-router-dom";
 import { useAuth } from "../../context/useAuth";
 import { supabase } from "../../lib/supabase";
-import { Button } from "../../components/ui";
+import { checkHasAdmin } from "../../lib/adminSetup";
+import {
+  AlertCircleIcon,
+  ArrowLeftIcon,
+  CheckIcon,
+  EyeIcon,
+  EyeOffIcon,
+  Loading,
+  SpinnerIcon,
+} from "../../components/ui";
 
 export default function Register() {
-  const { user, isLoading } = useAuth();
+  const { user, userRole, isLoading } = useAuth();
+  const emailId = useId();
+  const passwordId = useId();
+  const confirmId = useId();
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
+  const [adminCheckFailed, setAdminCheckFailed] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isSuccess, setIsSuccess] = useState(false);
   const [hasAdmin, setHasAdmin] = useState<boolean | null>(null);
 
-  useEffect(() => {
-    checkAdminExists();
-  }, []);
-
-  const checkAdminExists = async () => {
+  const loadAdminStatus = async () => {
+    setAdminCheckFailed(false);
     try {
-      const { data, error } = await supabase.rpc("get_user_count");
-
-      if (error) throw error;
-      setHasAdmin((data || 0) > 0);
+      const exists = await checkHasAdmin();
+      setHasAdmin(exists);
     } catch (err) {
       console.error("Error checking admin:", err);
-      // If function doesn't exist, assume no admin
-      setHasAdmin(false);
+      // Fail closed on network/RPC error
+      setAdminCheckFailed(true);
+      setHasAdmin(true);
     }
   };
 
-  // Redirect if already logged in
-  if (!isLoading && user) {
+  useEffect(() => {
+    void loadAdminStatus();
+  }, []);
+
+  if (!isLoading && user && userRole) {
+    if (userRole === "college") {
+      return <Navigate to="/college" replace />;
+    }
     return <Navigate to="/admin/dashboard" replace />;
   }
 
-  // Redirect to login if admin already exists
-  if (hasAdmin === true) {
-    return <Navigate to="/admin/login" replace />;
+  if (hasAdmin === true && !adminCheckFailed) {
+    return <Navigate to="/login" replace />;
   }
 
-  // Loading state while checking
-  if (hasAdmin === null) {
+  if (hasAdmin === null || isLoading) {
     return (
-      <div className="min-h-screen bg-linear-to-br from-maroon-800 via-maroon-900 to-maroon-950 flex items-center justify-center">
-        <div className="text-white">Loading...</div>
-      </div>
+      <main className="min-h-screen bg-linear-to-br from-maroon-800 via-maroon-900 to-maroon-950 flex items-center justify-center">
+        <Loading size="lg" variant="light" text="Loading…" />
+      </main>
+    );
+  }
+
+  if (adminCheckFailed) {
+    return (
+      <main className="min-h-screen bg-linear-to-br from-maroon-800 via-maroon-900 to-maroon-950 flex items-center justify-center px-4 py-12">
+        <div className="w-full max-w-md bg-white/10 backdrop-blur-md rounded-2xl border border-white/20 shadow-2xl p-8 text-center">
+          <h1 className="text-xl font-bold text-white mb-2">
+            Unable to Verify Setup Status
+          </h1>
+          <p className="text-white/80 text-sm mb-6">
+            Registration cannot proceed while the server status cannot be
+            verified.
+          </p>
+          <div className="flex flex-col gap-3">
+            <button
+              type="button"
+              onClick={() => void loadAdminStatus()}
+              className="w-full min-h-11 py-3 px-4 bg-white text-maroon-900 font-semibold rounded-lg hover:bg-white/90 transition-colors active:scale-[0.97]"
+            >
+              Try Again
+            </button>
+            <Link
+              to="/login"
+              className="w-full min-h-11 py-3 px-4 bg-white/15 text-white font-semibold rounded-lg hover:bg-white/25 border border-white/25 flex items-center justify-center transition-colors"
+            >
+              Go to Login
+            </Link>
+          </div>
+        </div>
+      </main>
     );
   }
 
@@ -56,32 +101,28 @@ export default function Register() {
     e.preventDefault();
     setError("");
 
-    if (!email || !password) {
-      setError("Please fill in all fields");
+    if (!email.trim() || !password) {
+      setError("Please fill in all fields.");
       return;
     }
 
-    if (password.length < 6) {
-      setError("Password must be at least 6 characters");
+    if (password.length < 8) {
+      setError("Password must be at least 8 characters.");
       return;
     }
 
     if (password !== confirmPassword) {
-      setError("Passwords do not match");
+      setError("Passwords do not match.");
       return;
     }
 
     setIsSubmitting(true);
     try {
-      // Sign up the first admin with role in metadata
       const { error: signUpError } = await supabase.auth.signUp({
-        email,
+        email: email.trim(),
         password,
         options: {
           emailRedirectTo: `${window.location.origin}/admin/dashboard`,
-          data: {
-            role: "admin",
-          },
         },
       });
 
@@ -93,7 +134,7 @@ export default function Register() {
       setError(
         err instanceof Error
           ? err.message
-          : "Registration failed. Please try again."
+          : "Registration failed. Please try again.",
       );
     } finally {
       setIsSubmitting(false);
@@ -102,65 +143,39 @@ export default function Register() {
 
   if (isSuccess) {
     return (
-      <div className="min-h-screen bg-linear-to-br from-maroon-800 via-maroon-900 to-maroon-950 flex items-center justify-center px-4 py-12 relative overflow-hidden">
-        {/* Decorative Elements */}
-        <div className="absolute inset-0 overflow-hidden pointer-events-none">
-          <div className="absolute -top-40 -right-40 w-80 h-80 bg-maroon-700/20 rounded-full blur-3xl" />
-          <div className="absolute -bottom-40 -left-40 w-80 h-80 bg-maroon-600/20 rounded-full blur-3xl" />
-        </div>
-
-        <div className="w-full max-w-md animate-fade-in relative z-10">
-          <div className="bg-white rounded-2xl shadow-2xl p-8 text-center">
-            <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
-              <svg
-                className="w-8 h-8 text-green-600"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"
-                />
-              </svg>
+      <main className="min-h-screen bg-linear-to-br from-maroon-800 via-maroon-900 to-maroon-950 flex items-center justify-center px-4 py-12">
+        <div className="w-full max-w-md animate-fade-in">
+          <div className="bg-white/10 backdrop-blur-md rounded-2xl border border-white/20 shadow-2xl p-8 text-center">
+            <div className="w-16 h-16 bg-emerald-500/20 rounded-full flex items-center justify-center mx-auto mb-4 border border-emerald-300/30">
+              <CheckIcon className="w-8 h-8 text-emerald-200" />
             </div>
-            <h2 className="text-xl font-bold text-gray-900 mb-2">
+            <h1 className="text-xl font-bold text-white mb-2">
               Verify Your Email
-            </h2>
-            <p className="text-gray-600 mb-6">
+            </h1>
+            <p className="text-white/85 text-sm mb-6">
               We&apos;ve sent a verification link to{" "}
-              <span className="font-medium text-maroon-800">{email}</span>.
-              Please check your inbox and click the link to activate your admin
-              account.
+              <span className="font-semibold text-white">{email}</span>. Check
+              your inbox to activate your administrator account.
             </p>
-            <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 text-sm text-amber-800 mb-6">
-              <strong>Note:</strong> The email may take a few minutes to arrive.
-              Check your spam folder if you don&apos;t see it.
+            <div className="bg-amber-500/20 border border-amber-300/30 rounded-lg p-4 text-sm text-amber-100 mb-6 text-left">
+              <strong>Note:</strong> Check your spam folder if the message does
+              not arrive within a few minutes.
             </div>
-            <Link to="/admin/login">
-              <Button variant="secondary" className="w-full">
-                Go to Login
-              </Button>
+            <Link
+              to="/login"
+              className="w-full min-h-11 py-3 px-4 bg-white text-maroon-900 font-semibold rounded-lg hover:bg-white/90 transition-[background-color,transform] duration-150 active:scale-[0.97] inline-flex items-center justify-center"
+            >
+              Go to Login
             </Link>
           </div>
         </div>
-      </div>
+      </main>
     );
   }
 
   return (
-    <div className="min-h-screen bg-linear-to-br from-maroon-800 via-maroon-900 to-maroon-950 flex items-center justify-center px-4 py-12 relative overflow-hidden">
-      {/* Decorative Elements */}
-      <div className="absolute inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute -top-40 -right-40 w-80 h-80 bg-maroon-700/20 rounded-full blur-3xl" />
-        <div className="absolute -bottom-40 -left-40 w-80 h-80 bg-maroon-600/20 rounded-full blur-3xl" />
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-maroon-700/10 rounded-full blur-3xl" />
-      </div>
-
-      <div className="w-full max-w-md animate-fade-in relative z-10">
-        {/* Logo & Header */}
+    <main className="min-h-screen bg-linear-to-br from-maroon-800 via-maroon-900 to-maroon-950 flex items-center justify-center px-4 py-12">
+      <div className="w-full max-w-md animate-fade-in">
         <div className="text-center mb-8">
           <div className="inline-flex items-center justify-center w-20 h-20 bg-white/10 backdrop-blur-sm rounded-2xl mb-4 border border-white/20 shadow-xl">
             <img
@@ -172,105 +187,106 @@ export default function Register() {
           <h1 className="text-3xl font-bold text-white mb-2">
             Create Admin Account
           </h1>
-          <p className="text-maroon-200">
+          <p className="text-maroon-100">
             Set up the first administrator for this system
           </p>
         </div>
 
-        {/* Register Form Card */}
         <div className="bg-white/10 backdrop-blur-md rounded-2xl border border-white/20 shadow-2xl p-8">
           <form onSubmit={handleSubmit} className="space-y-5">
             {error && (
-              <div className="bg-red-500/20 backdrop-blur-sm border border-red-400/30 rounded-lg p-4 flex items-start gap-3">
-                <svg
-                  className="w-5 h-5 text-red-300 shrink-0 mt-0.5"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-                  />
-                </svg>
-                <p className="text-sm text-red-200">{error}</p>
+              <div
+                role="alert"
+                className="bg-red-500/20 backdrop-blur-sm border border-red-300/40 rounded-lg p-4 flex items-start gap-3"
+              >
+                <AlertCircleIcon className="w-5 h-5 text-red-200 shrink-0 mt-0.5" />
+                <p className="text-sm text-red-100">{error}</p>
               </div>
             )}
 
             <div>
-              <label className="block text-sm font-medium text-white/90 mb-1.5">
+              <label
+                htmlFor={emailId}
+                className="block text-sm font-medium text-white/95 mb-1.5"
+              >
                 Email Address
               </label>
               <input
+                id={emailId}
                 type="email"
                 placeholder="admin@example.com"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 autoComplete="email"
                 required
-                className="w-full px-4 py-3 bg-white/10 border border-white/20 rounded-lg text-white placeholder-white/50 focus:outline-none focus:ring-2 focus:ring-white/30 focus:border-transparent transition-all"
+                className="w-full px-4 py-3 bg-white/10 border border-white/25 rounded-lg text-white placeholder-white/65 focus:outline-none focus:ring-2 focus:ring-white/60 focus:border-transparent transition-colors duration-150"
               />
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-white/90 mb-1.5">
+              <label
+                htmlFor={passwordId}
+                className="block text-sm font-medium text-white/95 mb-1.5"
+              >
                 Password
               </label>
-              <input
-                type="password"
-                placeholder="••••••••"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                autoComplete="new-password"
-                required
-                className="w-full px-4 py-3 bg-white/10 border border-white/20 rounded-lg text-white placeholder-white/50 focus:outline-none focus:ring-2 focus:ring-white/30 focus:border-transparent transition-all"
-              />
-              <p className="mt-1 text-xs text-white/60">
-                At least 6 characters
+              <div className="relative">
+                <input
+                  id={passwordId}
+                  type={showPassword ? "text" : "password"}
+                  placeholder="••••••••"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  autoComplete="new-password"
+                  minLength={8}
+                  required
+                  className="w-full px-4 py-3 pr-12 bg-white/10 border border-white/25 rounded-lg text-white placeholder-white/65 focus:outline-none focus:ring-2 focus:ring-white/60 focus:border-transparent transition-colors duration-150"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword((prev) => !prev)}
+                  aria-label={showPassword ? "Hide password" : "Show password"}
+                  aria-pressed={showPassword}
+                  className="absolute right-1 top-1/2 -translate-y-1/2 w-10 h-10 flex items-center justify-center rounded-md text-white/80 hover:text-white transition-colors"
+                >
+                  {showPassword ? <EyeOffIcon /> : <EyeIcon />}
+                </button>
+              </div>
+              <p className="mt-1.5 text-xs text-white/80">
+                At least 8 characters
               </p>
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-white/90 mb-1.5">
+              <label
+                htmlFor={confirmId}
+                className="block text-sm font-medium text-white/95 mb-1.5"
+              >
                 Confirm Password
               </label>
               <input
-                type="password"
+                id={confirmId}
+                type={showPassword ? "text" : "password"}
                 placeholder="••••••••"
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
                 autoComplete="new-password"
+                minLength={8}
                 required
-                className="w-full px-4 py-3 bg-white/10 border border-white/20 rounded-lg text-white placeholder-white/50 focus:outline-none focus:ring-2 focus:ring-white/30 focus:border-transparent transition-all"
+                className="w-full px-4 py-3 bg-white/10 border border-white/25 rounded-lg text-white placeholder-white/65 focus:outline-none focus:ring-2 focus:ring-white/60 focus:border-transparent transition-colors duration-150"
               />
             </div>
 
             <button
               type="submit"
               disabled={isSubmitting}
-              className="w-full py-3 px-4 bg-white text-maroon-900 font-semibold rounded-lg hover:bg-white/90 focus:outline-none focus:ring-2 focus:ring-white/50 focus:ring-offset-2 focus:ring-offset-maroon-900 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+              aria-busy={isSubmitting || undefined}
+              className="w-full min-h-11 py-3 px-4 bg-white text-maroon-900 font-semibold rounded-lg hover:bg-white/90 focus:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-maroon-900 transition-[background-color,transform] duration-150 ease-out active:scale-[0.97] disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100 flex items-center justify-center gap-2"
             >
               {isSubmitting ? (
                 <>
-                  <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
-                    <circle
-                      className="opacity-25"
-                      cx="12"
-                      cy="12"
-                      r="10"
-                      stroke="currentColor"
-                      strokeWidth="4"
-                      fill="none"
-                    />
-                    <path
-                      className="opacity-75"
-                      fill="currentColor"
-                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                    />
-                  </svg>
-                  Creating Account...
+                  <SpinnerIcon className="h-5 w-5" />
+                  Creating Account…
                 </>
               ) : (
                 "Create Admin Account"
@@ -279,29 +295,16 @@ export default function Register() {
           </form>
         </div>
 
-        {/* Back Link */}
         <div className="text-center mt-6">
           <Link
-            to="/"
-            className="text-sm text-white/70 hover:text-white transition-colors inline-flex items-center gap-2"
+            to="/public"
+            className="text-sm text-white/85 hover:text-white hover:underline py-2.5 px-3 transition-colors inline-flex items-center gap-2"
           >
-            <svg
-              className="w-4 h-4"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M10 19l-7-7m0 0l7-7m-7 7h18"
-              />
-            </svg>
+            <ArrowLeftIcon />
             Back to Evaluation Portal
           </Link>
         </div>
       </div>
-    </div>
+    </main>
   );
 }

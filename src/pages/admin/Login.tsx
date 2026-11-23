@@ -1,36 +1,47 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useId } from "react";
 import type { FormEvent } from "react";
 import { Navigate, Link } from "react-router-dom";
 import { useAuth } from "../../context/useAuth";
-import { supabase } from "../../lib/supabase";
-import { Loading } from "../../components/ui";
+import { checkHasAdmin } from "../../lib/adminSetup";
+import {
+  AlertCircleIcon,
+  ArrowLeftIcon,
+  EyeIcon,
+  EyeOffIcon,
+  Loading,
+  SpinnerIcon,
+} from "../../components/ui";
 
 export default function Login() {
   const { user, userRole, isLoading, signIn } = useAuth();
+  const emailId = useId();
+  const passwordId = useId();
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
+  const [adminCheckError, setAdminCheckError] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [hasAdmin, setHasAdmin] = useState<boolean | null>(null);
 
-  useEffect(() => {
-    checkAdminExists();
-  }, []);
-
-  const checkAdminExists = async () => {
+  const loadAdminStatus = async () => {
+    setAdminCheckError(false);
     try {
-      const { data, error } = await supabase.rpc("get_user_count");
-
-      if (error) throw error;
-      setHasAdmin((data || 0) > 0);
+      const exists = await checkHasAdmin();
+      setHasAdmin(exists);
     } catch (err) {
       console.error("Error checking admin:", err);
-      setHasAdmin(false);
+      // Fail closed: never redirect to admin registration on error
+      setAdminCheckError(true);
+      setHasAdmin(true);
     }
   };
 
-  // Redirect based on role if already logged in
+  useEffect(() => {
+    void loadAdminStatus();
+  }, []);
+
   if (!isLoading && user && userRole) {
     if (userRole === "college") {
       return <Navigate to="/college" replace />;
@@ -38,17 +49,15 @@ export default function Login() {
     return <Navigate to="/admin/dashboard" replace />;
   }
 
-  // Redirect to register if no admin exists
   if (hasAdmin === false) {
     return <Navigate to="/admin/register" replace />;
   }
 
-  // Loading state while checking
   if (hasAdmin === null || isLoading) {
     return (
-      <div className="min-h-screen bg-linear-to-br from-maroon-800 via-maroon-900 to-maroon-950 flex items-center justify-center">
-        <Loading size="lg" text="Loading..." />
-      </div>
+      <main className="min-h-screen bg-linear-to-br from-maroon-800 via-maroon-900 to-maroon-950 flex items-center justify-center">
+        <Loading size="lg" variant="light" text="Loading…" />
+      </main>
     );
   }
 
@@ -56,24 +65,17 @@ export default function Login() {
     e.preventDefault();
     setError("");
 
-    if (!email || !password) {
-      setError("Please enter both email and password");
+    if (!email.trim() || !password) {
+      setError("Please enter both email and password.");
       return;
     }
 
     setIsSubmitting(true);
     try {
-      const { error } = await signIn(email, password);
-      if (error) {
-        if (error.message.includes("Email not confirmed")) {
-          setError(
-            "Please verify your email address. Check your inbox for the confirmation link."
-          );
-        } else {
-          setError(error.message || "Invalid email or password");
-        }
+      const { error: signInError } = await signIn(email.trim(), password);
+      if (signInError) {
+        setError("Invalid email or password.");
       }
-      // Navigation is handled by AuthContext role detection
     } catch {
       setError("An unexpected error occurred. Please try again.");
     } finally {
@@ -82,16 +84,8 @@ export default function Login() {
   };
 
   return (
-    <div className="min-h-screen bg-linear-to-br from-maroon-800 via-maroon-900 to-maroon-950 flex items-center justify-center px-4 py-12 relative overflow-hidden">
-      {/* Decorative Elements */}
-      <div className="absolute inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute -top-40 -right-40 w-80 h-80 bg-maroon-700/20 rounded-full blur-3xl" />
-        <div className="absolute -bottom-40 -left-40 w-80 h-80 bg-maroon-600/20 rounded-full blur-3xl" />
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-maroon-700/10 rounded-full blur-3xl" />
-      </div>
-
-      <div className="w-full max-w-md animate-fade-in relative z-10">
-        {/* Logo & Header */}
+    <main className="min-h-screen bg-linear-to-br from-maroon-800 via-maroon-900 to-maroon-950 flex items-center justify-center px-4 py-12">
+      <div className="w-full max-w-md animate-fade-in">
         <div className="text-center mb-8">
           <div className="inline-flex items-center justify-center w-20 h-20 bg-white/10 backdrop-blur-sm rounded-2xl mb-4 border border-white/20 shadow-xl">
             <img
@@ -101,67 +95,92 @@ export default function Login() {
             />
           </div>
           <h1 className="text-3xl font-bold text-white mb-2">Welcome Back</h1>
-          <p className="text-maroon-200">
+          <p className="text-maroon-100">
             Sign in to the Academic Affairs Evaluation System
           </p>
         </div>
 
-        {/* Login Form Card */}
         <div className="bg-white/10 backdrop-blur-md rounded-2xl border border-white/20 shadow-2xl p-8">
+          {adminCheckError && (
+            <div
+              role="alert"
+              className="bg-amber-500/20 border border-amber-300/40 rounded-lg p-3 mb-5 text-sm text-amber-100 flex items-center justify-between gap-2"
+            >
+              <span>Could not verify server status. Check connection.</span>
+              <button
+                type="button"
+                onClick={() => void loadAdminStatus()}
+                className="underline font-medium shrink-0 text-white hover:text-maroon-100"
+              >
+                Retry
+              </button>
+            </div>
+          )}
+
           <form onSubmit={handleSubmit} className="space-y-5">
             {error && (
-              <div className="bg-red-500/20 backdrop-blur-sm border border-red-400/30 rounded-lg p-4 flex items-start gap-3">
-                <svg
-                  className="w-5 h-5 text-red-300 shrink-0 mt-0.5"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-                  />
-                </svg>
-                <p className="text-sm text-red-200">{error}</p>
+              <div
+                role="alert"
+                className="bg-red-500/20 backdrop-blur-sm border border-red-300/40 rounded-lg p-4 flex items-start gap-3"
+              >
+                <AlertCircleIcon className="w-5 h-5 text-red-200 shrink-0 mt-0.5" />
+                <p className="text-sm text-red-100">{error}</p>
               </div>
             )}
 
             <div>
-              <label className="block text-sm font-medium text-white/90 mb-1.5">
+              <label
+                htmlFor={emailId}
+                className="block text-sm font-medium text-white/95 mb-1.5"
+              >
                 Email Address
               </label>
               <input
+                id={emailId}
                 type="email"
                 placeholder="email@example.com"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 autoComplete="email"
                 required
-                className="w-full px-4 py-3 bg-white/10 border border-white/20 rounded-lg text-white placeholder-white/50 focus:outline-none focus:ring-2 focus:ring-white/30 focus:border-transparent transition-all"
+                className="w-full px-4 py-3 bg-white/10 border border-white/25 rounded-lg text-white placeholder-white/65 focus:outline-none focus:ring-2 focus:ring-white/60 focus:border-transparent transition-colors duration-150"
               />
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-white/90 mb-1.5">
+              <label
+                htmlFor={passwordId}
+                className="block text-sm font-medium text-white/95 mb-1.5"
+              >
                 Password
               </label>
-              <input
-                type="password"
-                placeholder="••••••••"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                autoComplete="current-password"
-                required
-                className="w-full px-4 py-3 bg-white/10 border border-white/20 rounded-lg text-white placeholder-white/50 focus:outline-none focus:ring-2 focus:ring-white/30 focus:border-transparent transition-all"
-              />
+              <div className="relative">
+                <input
+                  id={passwordId}
+                  type={showPassword ? "text" : "password"}
+                  placeholder="••••••••"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  autoComplete="current-password"
+                  required
+                  className="w-full px-4 py-3 pr-12 bg-white/10 border border-white/25 rounded-lg text-white placeholder-white/65 focus:outline-none focus:ring-2 focus:ring-white/60 focus:border-transparent transition-colors duration-150"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword((prev) => !prev)}
+                  aria-label={showPassword ? "Hide password" : "Show password"}
+                  aria-pressed={showPassword}
+                  className="absolute right-1 top-1/2 -translate-y-1/2 w-10 h-10 flex items-center justify-center rounded-md text-white/80 hover:text-white transition-colors"
+                >
+                  {showPassword ? <EyeOffIcon /> : <EyeIcon />}
+                </button>
+              </div>
             </div>
 
             <div className="flex justify-end">
               <Link
                 to="/forgot-password"
-                className="text-sm text-maroon-200! hover:text-white! transition-colors"
+                className="text-sm text-maroon-100 hover:text-white hover:underline py-2 px-1 transition-colors"
               >
                 Forgot password?
               </Link>
@@ -170,27 +189,13 @@ export default function Login() {
             <button
               type="submit"
               disabled={isSubmitting}
-              className="w-full py-3 px-4 bg-white text-maroon-900 font-semibold rounded-lg hover:bg-white/90 focus:outline-none focus:ring-2 focus:ring-white/50 focus:ring-offset-2 focus:ring-offset-maroon-900 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+              aria-busy={isSubmitting || undefined}
+              className="w-full min-h-11 py-3 px-4 bg-white text-maroon-900 font-semibold rounded-lg hover:bg-white/90 focus:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-maroon-900 transition-[background-color,transform] duration-150 ease-out active:scale-[0.97] disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100 flex items-center justify-center gap-2"
             >
               {isSubmitting ? (
                 <>
-                  <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
-                    <circle
-                      className="opacity-25"
-                      cx="12"
-                      cy="12"
-                      r="10"
-                      stroke="currentColor"
-                      strokeWidth="4"
-                      fill="none"
-                    />
-                    <path
-                      className="opacity-75"
-                      fill="currentColor"
-                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                    />
-                  </svg>
-                  Signing in...
+                  <SpinnerIcon className="h-5 w-5" />
+                  Signing in…
                 </>
               ) : (
                 "Sign In"
@@ -199,36 +204,20 @@ export default function Login() {
           </form>
         </div>
 
-        {/* Info text */}
-        <div className="text-center mt-6">
-          <p className="text-sm text-maroon-200/80">
-            Admin and College accounts can sign in here
-          </p>
-        </div>
+        <p className="text-center text-sm text-white/80 mt-6">
+          Admin and College accounts can sign in here
+        </p>
 
-        {/* Back to home link */}
-        <div className="text-center mt-4">
+        <div className="text-center mt-2">
           <Link
-            to="/"
-            className="text-sm text-white/70! hover:text-white! transition-colors inline-flex items-center gap-2"
+            to="/public"
+            className="text-sm text-white/85 hover:text-white hover:underline py-2.5 px-3 transition-colors inline-flex items-center gap-2"
           >
-            <svg
-              className="w-4 h-4"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M10 19l-7-7m0 0l7-7m-7 7h18"
-              />
-            </svg>
+            <ArrowLeftIcon />
             Back to Evaluation Portal
           </Link>
         </div>
       </div>
-    </div>
+    </main>
   );
 }
