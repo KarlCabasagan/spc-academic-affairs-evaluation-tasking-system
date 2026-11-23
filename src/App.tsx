@@ -11,7 +11,7 @@ import {
   CollegeComplianceMatrix,
   CollegeChangePassword,
 } from "./pages/college";
-import { Landing, Evaluate, Complete, ExportPage } from "./pages/public";
+import { Landing, Evaluate, ExportPage } from "./pages/public";
 import {
   Login,
   Register,
@@ -58,7 +58,6 @@ function App() {
             <Route index element={<Landing />} />
             <Route path="evaluate/:areaId" element={<Evaluate />} />
             <Route path="export" element={<ExportPage />} />
-            <Route path="complete" element={<Complete />} />
           </Route>
 
           {/* Shortcut routes for public pages */}
@@ -69,10 +68,6 @@ function App() {
           <Route
             path="/export"
             element={<Navigate to="/public/export" replace />}
-          />
-          <Route
-            path="/complete"
-            element={<Navigate to="/public/complete" replace />}
           />
 
           {/* Auth Routes */}
