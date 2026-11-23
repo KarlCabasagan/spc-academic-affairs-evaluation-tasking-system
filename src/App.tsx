@@ -5,7 +5,8 @@ import {
   Navigate,
   useParams,
 } from "react-router-dom";
-import { AuthProvider, useAuth } from "./context/AuthContext";
+import { AuthProvider } from "./context/AuthContext";
+import { useAuth } from "./context/useAuth";
 import { AdminLayout, CollegeLayout, PublicLayout } from "./components/layout";
 import { ToastContainer } from "./components/ui";
 import { Loading } from "./components/ui";

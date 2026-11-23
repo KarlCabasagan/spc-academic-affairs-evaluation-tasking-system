@@ -1,47 +1,24 @@
 import {
-  createContext,
-  useContext,
   useEffect,
   useState,
   useCallback,
+  useRef,
+  type ReactNode,
 } from "react";
-import type { ReactNode } from "react";
 import type { User, Session } from "@supabase/supabase-js";
 import { supabase } from "../lib/supabase";
 import type { UserRole, College } from "../lib/types";
+import { showToast } from "../components/ui/toastBus";
+import { AuthContext } from "./useAuth";
 
-interface AuthContextType {
-  user: User | null;
-  session: Session | null;
-  userRole: UserRole | null;
-  college: College | null;
-  isLoading: boolean;
-  isOnline: boolean;
-  signIn: (email: string, password: string) => Promise<{ error: Error | null }>;
-  signOut: () => Promise<void>;
-  refreshCollege: () => Promise<void>;
-}
-
-const AuthContext = createContext<AuthContextType | undefined>(undefined);
-
-// Get role from user metadata - synchronous, no DB call needed
+// Read role strictly from server-managed app_metadata; never trust user_metadata or default to admin
 function getRoleFromMetadata(user: User | null): UserRole | null {
   if (!user) return null;
-
-  // Check app_metadata first (set by admin/service role)
-  const appRole = user.app_metadata?.role as UserRole | undefined;
+  const appRole = user.app_metadata?.role;
   if (appRole === "admin" || appRole === "college") {
     return appRole;
   }
-
-  // Check user_metadata as fallback
-  const userRole = user.user_metadata?.role as UserRole | undefined;
-  if (userRole === "admin" || userRole === "college") {
-    return userRole;
-  }
-
-  // Default to admin if no role set (for backwards compatibility)
-  return "admin";
+  return null;
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -51,45 +28,52 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [college, setCollege] = useState<College | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const sessionSeqRef = useRef(0);
 
-  // Fetch college profile for college users (background, non-blocking)
-  const fetchCollegeProfile = async (
-    userId: string,
-  ): Promise<College | null> => {
-    try {
-      const { data } = await supabase
-        .from("colleges")
-        .select("id, name, code, avatar_url")
-        .eq("user_id", userId)
-        .eq("is_active", true)
-        .maybeSingle();
+  const fetchCollegeProfile = useCallback(
+    async (userId: string): Promise<College | null> => {
+      try {
+        const { data, error } = await supabase
+          .from("colleges")
+          .select("id, name, code, avatar_url")
+          .eq("user_id", userId)
+          .eq("is_active", true)
+          .maybeSingle();
 
-      if (data) {
-        setCollege(data as College);
-        return data as College;
+        if (error) {
+          console.error("Error fetching college profile:", error);
+          return null;
+        }
+        return (data as College | null) ?? null;
+      } catch {
+        return null;
       }
-      return null;
-    } catch {
-      // Ignore errors - college profile is optional enhancement
-      return null;
-    }
-  };
+    },
+    [],
+  );
 
-  const refreshCollege = async () => {
+  const refreshCollege = useCallback(async () => {
     if (user && userRole === "college") {
-      await fetchCollegeProfile(user.id);
+      const profile = await fetchCollegeProfile(user.id);
+      setCollege(profile);
     }
-  };
+  }, [user, userRole, fetchCollegeProfile]);
 
-  // Sign out function - memoized to use in subscriptions
   const signOut = useCallback(async () => {
     setIsLoading(true);
-    await supabase.auth.signOut();
-    setCollege(null);
-    // onAuthStateChange handles the rest
+    try {
+      await supabase.auth.signOut();
+    } catch (err) {
+      console.error("Error signing out:", err);
+    } finally {
+      setCollege(null);
+      setUser(null);
+      setSession(null);
+      setUserRole(null);
+      setIsLoading(false);
+    }
   }, []);
 
-  // Network status listeners
   useEffect(() => {
     const handleOnline = () => setIsOnline(true);
     const handleOffline = () => setIsOnline(false);
@@ -103,7 +87,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  // Watch for college deletion (auto-logout)
+  // Watch for college deletion or deactivation (auto-logout)
   useEffect(() => {
     if (!college || userRole !== "college") return;
 
@@ -118,9 +102,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           filter: `id=eq.${college.id}`,
         },
         () => {
-          // College was deleted - sign out immediately
-          console.log("College account deleted, signing out...");
-          signOut();
+          showToast("Your college account has been removed.", "error");
+          void signOut();
         },
       )
       .on(
@@ -132,73 +115,114 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           filter: `id=eq.${college.id}`,
         },
         (payload) => {
-          // Check if deactivated
           if (
             payload.new &&
             (payload.new as { is_active?: boolean }).is_active === false
           ) {
-            console.log("College account deactivated, signing out...");
-            signOut();
+            showToast("Your college account has been deactivated.", "error");
+            void signOut();
           }
         },
       )
       .subscribe();
 
     return () => {
-      supabase.removeChannel(channel);
+      void supabase.removeChannel(channel);
     };
   }, [college, userRole, signOut]);
 
   useEffect(() => {
-    // Handle session updates - role is read synchronously from metadata
-    const handleSession = (session: Session | null) => {
-      setSession(session);
-      setUser(session?.user ?? null);
+    let active = true;
 
-      // Role is determined synchronously from metadata - NO DB call
-      const role = getRoleFromMetadata(session?.user ?? null);
-      setUserRole(role);
+    const handleSession = async (nextSession: Session | null) => {
+      const seq = ++sessionSeqRef.current;
 
-      // Fetch college profile in background if role is college
-      if (session?.user && role === "college") {
-        fetchCollegeProfile(session.user.id);
-      } else {
+      if (!nextSession?.user) {
+        if (!active || seq !== sessionSeqRef.current) return;
+        setSession(null);
+        setUser(null);
+        setUserRole(null);
         setCollege(null);
+        setIsLoading(false);
+        return;
       }
 
+      const role = getRoleFromMetadata(nextSession.user);
+
+      if (role === "college") {
+        const profile = await fetchCollegeProfile(nextSession.user.id);
+        if (!active || seq !== sessionSeqRef.current) return;
+
+        if (!profile) {
+          showToast(
+            "This college account is inactive or no longer exists.",
+            "error",
+          );
+          try {
+            await supabase.auth.signOut();
+          } catch {
+            // Ignore signOut failure while offline
+          }
+          if (!active || seq !== sessionSeqRef.current) return;
+          setSession(null);
+          setUser(null);
+          setUserRole(null);
+          setCollege(null);
+          setIsLoading(false);
+          return;
+        }
+
+        setSession(nextSession);
+        setUser(nextSession.user);
+        setUserRole(role);
+        setCollege(profile);
+        setIsLoading(false);
+        return;
+      }
+
+      if (!active || seq !== sessionSeqRef.current) return;
+      setSession(nextSession);
+      setUser(nextSession.user);
+      setUserRole(role);
+      setCollege(null);
       setIsLoading(false);
     };
 
-    // Get initial session
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      handleSession(session);
+    supabase.auth.getSession().then(({ data: { session: initialSession } }) => {
+      void handleSession(initialSession);
     });
 
-    // Listen for auth changes
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((event, session) => {
-      // Skip INITIAL_SESSION - handled by getSession
+    } = supabase.auth.onAuthStateChange((event, nextSession) => {
       if (event === "INITIAL_SESSION") return;
-      handleSession(session);
+      void handleSession(nextSession);
     });
 
     return () => {
+      active = false;
       subscription.unsubscribe();
     };
-  }, []);
+  }, [fetchCollegeProfile]);
 
   const signIn = async (email: string, password: string) => {
     setIsLoading(true);
-    const { error } = await supabase.auth.signInWithPassword({
-      email,
-      password,
-    });
-    if (error) {
+    try {
+      const { error } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
+      if (error) {
+        setIsLoading(false);
+      }
+      return { error: error as Error | null };
+    } catch (err) {
       setIsLoading(false);
+      return {
+        error:
+          err instanceof Error ? err : new Error("Authentication failed"),
+      };
     }
-    // Success: onAuthStateChange handles the rest
-    return { error: error as Error | null };
   };
 
   return (
@@ -218,12 +242,4 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       {children}
     </AuthContext.Provider>
   );
-}
-
-export function useAuth() {
-  const context = useContext(AuthContext);
-  if (context === undefined) {
-    throw new Error("useAuth must be used within an AuthProvider");
-  }
-  return context;
 }
