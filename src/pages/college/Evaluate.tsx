@@ -1,383 +1,221 @@
 import { useEffect, useState } from "react";
-import { useParams, useNavigate, Link } from "react-router-dom";
-import { supabase } from "../../lib/supabase";
-import { useAuth } from "../../context/useAuth";
-import type {
-  Area,
-  Question,
-  ComplianceStatus,
-  ResponseFormData,
-} from "../../lib/types";
+import { Link, useNavigate, useParams } from "react-router-dom";
+import QuestionItem, {
+  type QuestionResponseValue,
+} from "../../components/evaluation/QuestionItem";
 import {
+  AlertTriangleIcon,
+  ArrowLeftIcon,
   Button,
+  buttonVariants,
   Card,
+  CheckIcon,
+  InfoCircleIcon,
   Loading,
   Modal,
-  Textarea,
   showToast,
 } from "../../components/ui";
-
-interface QuestionResponse extends ResponseFormData {
-  answered: boolean;
-}
+import { useAuth } from "../../context/useAuth";
+import {
+  buildQuestionTree,
+  getLeafQuestions,
+  type TreeQuestionNode,
+} from "../../lib/questionTree";
+import { supabase } from "../../lib/supabase";
+import type { Area, ComplianceStatus, Question } from "../../lib/types";
 
 interface ExistingSessionInfo {
   sessionId: string;
   completedAt: string | null;
 }
 
-// Build hierarchical tree from flat question array
-function buildQuestionTree(questions: Question[]): Question[] {
-  const questionMap = new Map<string, Question>();
-  const roots: Question[] = [];
-
-  questions.forEach((q) => {
-    questionMap.set(q.id, { ...q, children: [] });
-  });
-
-  questions.forEach((q) => {
-    const question = questionMap.get(q.id)!;
-    if (q.parent_id && questionMap.has(q.parent_id)) {
-      const parent = questionMap.get(q.parent_id)!;
-      parent.children = parent.children || [];
-      parent.children.push(question);
-    } else {
-      roots.push(question);
-    }
-  });
-
-  const sortChildren = (items: Question[]) => {
-    items.sort((a, b) => a.question_order - b.question_order);
-    items.forEach((item) => {
-      if (item.children && item.children.length > 0) {
-        sortChildren(item.children);
-      }
-    });
-  };
-  sortChildren(roots);
-
-  const assignNumbers = (items: Question[], prefix: string = "") => {
-    items.forEach((item, index) => {
-      const num = prefix ? `${prefix}.${index + 1}` : `${index + 1}`;
-      item.hierarchical_number = num;
-      if (item.children && item.children.length > 0) {
-        assignNumbers(item.children, num);
-      }
-    });
-  };
-  assignNumbers(roots);
-
-  return roots;
+interface ExistingResponseRow {
+  question_id: string;
+  status: ComplianceStatus;
+  comment: string | null;
 }
 
-function getLeafQuestions(questions: Question[]): Question[] {
-  const leaves: Question[] = [];
-  const traverse = (items: Question[]) => {
-    items.forEach((item) => {
-      if (!item.children || item.children.length === 0) {
-        leaves.push(item);
-      } else {
-        traverse(item.children);
-      }
-    });
-  };
-  traverse(questions);
-  return leaves;
+interface ExistingSessionRow {
+  id: string;
+  completed_at: string | null;
+  responses: ExistingResponseRow[] | null;
 }
 
-interface QuestionItemProps {
-  question: Question;
-  depth: number;
-  responses: Map<string, QuestionResponse>;
-  onStatusChange: (questionId: string, status: ComplianceStatus) => void;
-  onCommentChange: (questionId: string, comment: string) => void;
-}
+async function submitFallbackInsertFirst(
+  collegeId: string,
+  areaQuestionIds: readonly string[],
+  answeredEntries: readonly [string, QuestionResponseValue][],
+): Promise<void> {
+  const { data: existingSessions } = await supabase
+    .from("evaluation_sessions")
+    .select("id")
+    .eq("college_id", collegeId);
 
-function QuestionItem({
-  question,
-  depth,
-  responses,
-  onStatusChange,
-  onCommentChange,
-}: QuestionItemProps) {
-  const hasChildren = question.children && question.children.length > 0;
-  const response = responses.get(question.id);
-  const effectiveDepth = Math.min(depth, 4);
+  const previousSessionIds = (existingSessions || []).map((s) => s.id);
 
-  if (hasChildren) {
-    return (
-      <div className="space-y-4">
-        <div
-          className={`${depth === 0 ? "mt-6" : "mt-4"} relative`}
-          style={{
-            marginLeft: `${Math.min(effectiveDepth, 2) * 8}px`,
-            paddingLeft: effectiveDepth > 0 ? "16px" : "0",
-          }}
-        >
-          {depth > 0 && (
-            <div
-              className="absolute left-0 top-0 bottom-0 w-0.5 bg-maroon-200"
-              style={{ left: "-1px" }}
-            />
-          )}
+  const sessionToken = crypto.randomUUID();
+  const { data: sessionData, error: sessionError } = await supabase
+    .from("evaluation_sessions")
+    .insert({
+      session_token: sessionToken,
+      college_id: collegeId,
+    })
+    .select("id")
+    .single();
 
-          <div className="flex items-start gap-3 bg-maroon-50/50 rounded-lg p-4 border border-maroon-100">
-            <span className="shrink-0 px-3 py-1.5 bg-maroon-600 text-white rounded-lg text-sm font-bold shadow-sm">
-              {question.hierarchical_number}
-            </span>
-            <div className="flex-1">
-              <h3 className="font-semibold text-gray-800 text-lg leading-snug">
-                {question.question_text}
-              </h3>
-              <p className="text-sm text-maroon-600 mt-1 font-medium">
-                {question.children!.length} sub-item
-                {question.children!.length > 1 ? "s" : ""} in this section
-              </p>
-            </div>
-          </div>
-        </div>
-
-        <div
-          className="space-y-4 relative"
-          style={{
-            marginLeft: `${Math.min(effectiveDepth + 1, 3) * 8}px`,
-            paddingLeft: "16px",
-          }}
-        >
-          <div
-            className="absolute left-0 top-0 w-0.5 bg-maroon-200"
-            style={{ left: "-1px", bottom: "40px" }}
-          />
-
-          {question.children!.map((child) => (
-            <QuestionItem
-              key={child.id}
-              question={child}
-              depth={depth + 1}
-              responses={responses}
-              onStatusChange={onStatusChange}
-              onCommentChange={onCommentChange}
-            />
-          ))}
-
-          <div
-            className="flex items-center gap-3 py-3 border-t border-dashed border-gray-300"
-            style={{ marginLeft: "-16px", paddingLeft: "16px" }}
-          >
-            <div className="flex-1 h-px bg-linear-to-r from-maroon-200 to-transparent" />
-            <span className="text-xs text-gray-400 font-medium whitespace-nowrap">
-              End of Section {question.hierarchical_number}
-            </span>
-            <div className="flex-1 h-px bg-linear-to-l from-maroon-200 to-transparent" />
-          </div>
-        </div>
-      </div>
-    );
+  if (sessionError || !sessionData) {
+    throw sessionError || new Error("Failed to create evaluation session");
   }
 
-  return (
-    <Card
-      className={`transition-all duration-200 ${
-        response?.answered ? "border-maroon-200 bg-maroon-50/30" : ""
-      }`}
-      style={{
-        marginLeft: depth > 0 ? `${Math.min(effectiveDepth, 3) * 8}px` : "0",
-      }}
-    >
-      <div className="flex flex-col sm:flex-row sm:items-start gap-4">
-        <div className="shrink-0 w-auto px-2 py-1 bg-gray-100 text-gray-600 rounded-lg text-sm font-medium">
-          {question.hierarchical_number}
-        </div>
-        <div className="flex-1">
-          <p className="text-gray-900 font-medium mb-4">
-            {question.question_text}
-            {question.is_required && (
-              <span className="text-red-500 ml-1">*</span>
-            )}
-          </p>
+  const responsesToInsert = answeredEntries.map(([questionId, entry]) => ({
+    session_id: sessionData.id,
+    question_id: questionId,
+    status: entry.status,
+    comment: entry.comment.trim() || null,
+  }));
 
-          <div className="flex flex-col sm:flex-row flex-wrap gap-2 mb-4">
-            <button
-              onClick={() => onStatusChange(question.id, "complied")}
-              className={`px-4 py-3 sm:py-2 rounded-lg text-sm font-medium transition-all duration-200 flex items-center justify-center sm:justify-start gap-2 ${
-                response?.status === "complied" && response?.answered
-                  ? "bg-green-600 text-white ring-2 ring-green-300"
-                  : "bg-green-50 text-green-700 hover:bg-green-100 border border-green-200"
-              }`}
-            >
-              <svg
-                className="w-4 h-4"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M5 13l4 4L19 7"
-                />
-              </svg>
-              Complied
-            </button>
-            <button
-              onClick={() => onStatusChange(question.id, "not_complied")}
-              className={`px-4 py-3 sm:py-2 rounded-lg text-sm font-medium transition-all duration-200 flex items-center justify-center sm:justify-start gap-2 ${
-                response?.status === "not_complied" && response?.answered
-                  ? "bg-red-600 text-white ring-2 ring-red-300"
-                  : "bg-red-50 text-red-700 hover:bg-red-100 border border-red-200"
-              }`}
-            >
-              <svg
-                className="w-4 h-4"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M6 18L18 6M6 6l12 12"
-                />
-              </svg>
-              Not Complied
-            </button>
-            <button
-              onClick={() => onStatusChange(question.id, "not_applicable")}
-              className={`px-4 py-3 sm:py-2 rounded-lg text-sm font-medium transition-all duration-200 flex items-center justify-center sm:justify-start gap-2 ${
-                response?.status === "not_applicable" && response?.answered
-                  ? "bg-gray-600 text-white ring-2 ring-gray-300"
-                  : "bg-gray-50 text-gray-700 hover:bg-gray-100 border border-gray-200"
-              }`}
-            >
-              <svg
-                className="w-4 h-4"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M20 12H4"
-                />
-              </svg>
-              Not Applicable
-            </button>
-          </div>
+  const { error: responsesError } = await supabase
+    .from("responses")
+    .insert(responsesToInsert);
 
-          <Textarea
-            placeholder="Add a comment (optional)..."
-            value={response?.comment || ""}
-            onChange={(e) => onCommentChange(question.id, e.target.value)}
-            className="text-sm"
-            rows={2}
-          />
-        </div>
-      </div>
-    </Card>
-  );
+  if (responsesError) {
+    // Roll back the orphaned session if inserting responses failed
+    await supabase
+      .from("evaluation_sessions")
+      .delete()
+      .eq("id", sessionData.id);
+    throw responsesError;
+  }
+
+  const { error: completeError } = await supabase
+    .from("evaluation_sessions")
+    .update({ is_complete: true, completed_at: new Date().toISOString() })
+    .eq("id", sessionData.id);
+
+  if (completeError) {
+    throw completeError;
+  }
+
+  // Delete older responses for this area only after the new session is safely saved
+  if (previousSessionIds.length > 0 && areaQuestionIds.length > 0) {
+    await supabase
+      .from("responses")
+      .delete()
+      .in("session_id", previousSessionIds)
+      .in("question_id", [...areaQuestionIds]);
+
+    for (const oldSessionId of previousSessionIds) {
+      const { count } = await supabase
+        .from("responses")
+        .select("id", { count: "exact", head: true })
+        .eq("session_id", oldSessionId);
+
+      if (count === 0) {
+        await supabase
+          .from("evaluation_sessions")
+          .delete()
+          .eq("id", oldSessionId);
+      }
+    }
+  }
 }
 
-export default function CollegeEvaluate() {
-  const { areaId } = useParams<{ areaId: string }>();
+function CollegeEvaluateInner({ areaId }: { areaId: string | undefined }) {
   const navigate = useNavigate();
-  const { college } = useAuth();
+  const { college, isOnline } = useAuth();
+  const collegeId = college?.id;
 
   const [area, setArea] = useState<Area | null>(null);
-  const [questionTree, setQuestionTree] = useState<Question[]>([]);
-  const [leafQuestions, setLeafQuestions] = useState<Question[]>([]);
-  const [responses, setResponses] = useState<Map<string, QuestionResponse>>(
-    new Map()
-  );
+  const [questionTree, setQuestionTree] = useState<
+    TreeQuestionNode<Question>[]
+  >([]);
+  const [leafQuestions, setLeafQuestions] = useState<
+    TreeQuestionNode<Question>[]
+  >([]);
+  const [responses, setResponses] = useState<
+    Map<string, QuestionResponseValue>
+  >(() => new Map());
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  // Single-submission model: track existing evaluation
   const [existingSession, setExistingSession] =
     useState<ExistingSessionInfo | null>(null);
   const [showOverwriteModal, setShowOverwriteModal] = useState(false);
 
   useEffect(() => {
-    if (areaId && college) {
-      fetchAreaAndQuestions();
-    }
-  }, [areaId, college]);
+    let cancelled = false;
 
-  const fetchAreaAndQuestions = async () => {
-    try {
-      const { data: areaData, error: areaError } = await supabase
-        .from("areas")
-        .select("*")
-        .eq("id", areaId)
-        .eq("is_active", true)
-        .single();
+    const loadAreaAndQuestions = async () => {
+      if (!areaId) {
+        await Promise.resolve();
+        if (!cancelled) {
+          setError("No evaluation area was specified.");
+          setIsLoading(false);
+        }
+        return;
+      }
 
-      if (areaError) throw areaError;
-      if (!areaData) throw new Error("Area not found");
+      if (!collegeId) {
+        return;
+      }
 
-      setArea(areaData);
+      try {
+        const [areaRes, questionsRes] = await Promise.all([
+          supabase
+            .from("areas")
+            .select("*")
+            .eq("id", areaId)
+            .eq("is_active", true)
+            .single(),
+          supabase
+            .from("questions")
+            .select("*")
+            .eq("area_id", areaId)
+            .eq("is_active", true)
+            .order("question_order", { ascending: true }),
+        ]);
 
-      const { data: questionsData, error: questionsError } = await supabase
-        .from("questions")
-        .select("*")
-        .eq("area_id", areaId)
-        .eq("is_active", true)
-        .order("question_order", { ascending: true });
+        if (areaRes.error) throw areaRes.error;
+        if (!areaRes.data) throw new Error("Area not found");
+        if (questionsRes.error) throw questionsRes.error;
 
-      if (questionsError) throw questionsError;
-
-      const tree = buildQuestionTree(questionsData || []);
-      setQuestionTree(tree);
-      const leaves = getLeafQuestions(tree);
-      setLeafQuestions(leaves);
-
-      // Check for existing evaluation session for this area
-      let existingResponses: Map<
-        string,
-        { status: ComplianceStatus; comment: string }
-      > = new Map();
-      if (college) {
+        const tree = buildQuestionTree((questionsRes.data || []) as Question[]);
+        const leaves = getLeafQuestions(tree);
         const questionIds = leaves.map((q) => q.id);
-        const { data: existingSessions } = await supabase
-          .from("evaluation_sessions")
-          .select(
-            `
-            id,
-            completed_at,
-            responses!inner (
-              question_id,
-              status,
-              comment
-            )
-          `
-          )
-          .eq("college_id", college.id)
-          .eq("is_complete", true)
-          .in("responses.question_id", questionIds);
 
-        if (existingSessions && existingSessions.length > 0) {
-          // Find the session that has responses for this area
-          const sessionWithAreaResponses = existingSessions.find(
-            (session: any) =>
-              session.responses?.some((r: any) =>
-                questionIds.includes(r.question_id)
-              )
+        const existingMap = new Map<
+          string,
+          { status: ComplianceStatus; comment: string }
+        >();
+        let matchedSession: ExistingSessionInfo | null = null;
+
+        if (questionIds.length > 0) {
+          const { data: sessionsData, error: sessionsError } = await supabase
+            .from("evaluation_sessions")
+            .select(
+              "id, completed_at, responses!inner(question_id, status, comment)",
+            )
+            .eq("college_id", collegeId)
+            .eq("is_complete", true)
+            .in("responses.question_id", questionIds)
+            .order("completed_at", { ascending: false });
+
+          if (sessionsError) throw sessionsError;
+
+          const typedSessions = (sessionsData || []) as ExistingSessionRow[];
+          const leafIdSet = new Set(questionIds);
+          const newestSession = typedSessions.find((session) =>
+            session.responses?.some((r) => leafIdSet.has(r.question_id)),
           );
 
-          if (sessionWithAreaResponses) {
-            setExistingSession({
-              sessionId: sessionWithAreaResponses.id,
-              completedAt: sessionWithAreaResponses.completed_at,
-            });
-
-            // Pre-populate responses from existing data
-            (sessionWithAreaResponses as any).responses?.forEach((r: any) => {
-              if (questionIds.includes(r.question_id)) {
-                existingResponses.set(r.question_id, {
+          if (newestSession) {
+            matchedSession = {
+              sessionId: newestSession.id,
+              completedAt: newestSession.completed_at,
+            };
+            newestSession.responses?.forEach((r) => {
+              if (leafIdSet.has(r.question_id)) {
+                existingMap.set(r.question_id, {
                   status: r.status,
                   comment: r.comment || "",
                 });
@@ -385,184 +223,180 @@ export default function CollegeEvaluate() {
             });
           }
         }
-      }
 
-      // Initialize responses (with existing data if available)
-      const initialResponses = new Map<string, QuestionResponse>();
-      leaves.forEach((q) => {
-        const existing = existingResponses.get(q.id);
-        initialResponses.set(q.id, {
-          question_id: q.id,
-          status: existing?.status || "not_applicable",
-          comment: existing?.comment || "",
-          answered: !!existing, // Mark as answered if we have existing data
+        if (cancelled) return;
+
+        const initialResponses = new Map<string, QuestionResponseValue>();
+        leaves.forEach((q) => {
+          const existing = existingMap.get(q.id);
+          initialResponses.set(q.id, {
+            status: existing?.status || "not_applicable",
+            comment: existing?.comment || "",
+            answered: Boolean(existing),
+          });
         });
-      });
-      setResponses(initialResponses);
-    } catch (err) {
-      setError(
-        "Failed to load evaluation. The area may not exist or is unavailable."
-      );
-      console.error("Error fetching data:", err);
-    } finally {
-      setIsLoading(false);
-    }
-  };
+
+        setArea(areaRes.data as Area);
+        setQuestionTree(tree);
+        setLeafQuestions(leaves);
+        setExistingSession(matchedSession);
+        setResponses(initialResponses);
+        setError(null);
+      } catch {
+        if (!cancelled) {
+          setArea(null);
+          setError(
+            "Failed to load evaluation. The area may not exist or is unavailable.",
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setIsLoading(false);
+        }
+      }
+    };
+
+    void loadAreaAndQuestions();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [areaId, collegeId]);
 
   const handleStatusChange = (questionId: string, status: ComplianceStatus) => {
     setResponses((prev) => {
-      const newMap = new Map(prev);
-      const current = newMap.get(questionId);
-      if (current) {
-        newMap.set(questionId, { ...current, status, answered: true });
-      }
-      return newMap;
+      const next = new Map(prev);
+      const current = next.get(questionId);
+      next.set(questionId, {
+        status,
+        comment: current?.comment || "",
+        answered: true,
+      });
+      return next;
     });
   };
 
   const handleCommentChange = (questionId: string, comment: string) => {
     setResponses((prev) => {
-      const newMap = new Map(prev);
-      const current = newMap.get(questionId);
-      if (current) {
-        newMap.set(questionId, { ...current, comment });
-      }
-      return newMap;
+      const next = new Map(prev);
+      const current = next.get(questionId);
+      next.set(questionId, {
+        status: current?.status || "not_applicable",
+        comment,
+        answered: current?.answered ?? false,
+      });
+      return next;
     });
   };
 
-  const getAnsweredCount = () => {
-    return Array.from(responses.values()).filter((r) => r.answered).length;
-  };
+  const answeredCount = Array.from(responses.values()).filter(
+    (r) => r.answered,
+  ).length;
+  const requiredUnanswered = leafQuestions.filter(
+    (q) => q.is_required && !responses.get(q.id)?.answered,
+  );
+  const progressRatio =
+    leafQuestions.length > 0 ? answeredCount / leafQuestions.length : 0;
+  const progressPercent = Math.round(progressRatio * 100);
 
-  const getRequiredUnanswered = () => {
-    return leafQuestions.filter(
-      (q) => q.is_required && !responses.get(q.id)?.answered
+  const handleSubmit = async () => {
+    if (!collegeId || !areaId || isSubmitting) return;
+
+    const answeredEntries = Array.from(responses.entries()).filter(
+      ([, r]) => r.answered,
     );
-  };
 
-  // Called when user clicks submit - checks for existing data first
-  const handleSubmitClick = () => {
-    if (!college) {
-      showToast("You must be logged in to submit an evaluation", "error");
-      return;
-    }
-
-    const requiredUnanswered = getRequiredUnanswered();
-    if (requiredUnanswered.length > 0) {
+    if (answeredEntries.length === 0) {
       showToast(
-        `Please answer all required questions (${requiredUnanswered.length} remaining)`,
-        "error"
+        "Please answer at least one question before submitting.",
+        "error",
       );
       return;
     }
-
-    // If there's an existing session, show overwrite warning
-    if (existingSession) {
-      setShowOverwriteModal(true);
-    } else {
-      handleSubmit();
-    }
-  };
-
-  // Perform the actual submission (with atomic overwrite if needed)
-  const handleSubmit = async () => {
-    if (!college) return;
 
     setShowOverwriteModal(false);
     setIsSubmitting(true);
+
     try {
-      // ATOMIC OVERWRITE: Delete ALL previous responses for this area from this college
-      // This ensures single source of truth - no duplicate/stacking responses
-      const questionIds = leafQuestions.map((q) => q.id);
+      const rpcPayload = answeredEntries.map(([questionId, entry]) => ({
+        question_id: questionId,
+        status: entry.status,
+        comment: entry.comment.trim() || null,
+      }));
 
-      if (questionIds.length > 0) {
-        // Find all sessions for this college that have responses in this area
-        const { data: collegeSessions } = await supabase
-          .from("evaluation_sessions")
-          .select("id")
-          .eq("college_id", college.id);
+      const { error: rpcError } = await supabase.rpc("submit_area_evaluation", {
+        p_area_id: areaId,
+        p_responses: rpcPayload,
+      });
 
-        if (collegeSessions && collegeSessions.length > 0) {
-          const sessionIds = collegeSessions.map((s) => s.id);
-
-          // Delete all responses for these questions from any of this college's sessions
-          await supabase
-            .from("responses")
-            .delete()
-            .in("session_id", sessionIds)
-            .in("question_id", questionIds);
-
-          // Clean up any now-empty sessions
-          for (const sessionId of sessionIds) {
-            const { count } = await supabase
-              .from("responses")
-              .select("id", { count: "exact", head: true })
-              .eq("session_id", sessionId);
-
-            if (count === 0) {
-              await supabase
-                .from("evaluation_sessions")
-                .delete()
-                .eq("id", sessionId);
-            }
-          }
+      if (rpcError) {
+        if (rpcError.code !== "PGRST202") {
+          throw rpcError;
         }
+        await submitFallbackInsertFirst(
+          collegeId,
+          leafQuestions.map((q) => q.id),
+          answeredEntries,
+        );
       }
-
-      // Create new session
-      const sessionToken = crypto.randomUUID();
-      const { data: sessionData, error: sessionError } = await supabase
-        .from("evaluation_sessions")
-        .insert({
-          session_token: sessionToken,
-          college_id: college.id,
-        })
-        .select()
-        .single();
-
-      if (sessionError) throw sessionError;
-
-      const responsesToInsert = Array.from(responses.entries())
-        .filter(([, r]) => r.answered)
-        .map(([, r]) => ({
-          session_id: sessionData.id,
-          question_id: r.question_id,
-          status: r.status,
-          comment: r.comment || null,
-        }));
-
-      if (responsesToInsert.length > 0) {
-        const { error: responsesError } = await supabase
-          .from("responses")
-          .insert(responsesToInsert);
-        if (responsesError) throw responsesError;
-      }
-
-      await supabase
-        .from("evaluation_sessions")
-        .update({ is_complete: true, completed_at: new Date().toISOString() })
-        .eq("id", sessionData.id);
 
       showToast(
         existingSession
-          ? "Evaluation updated successfully!"
-          : "Evaluation submitted successfully!",
-        "success"
+          ? "Evaluation updated successfully."
+          : "Evaluation submitted successfully.",
+        "success",
       );
       navigate("/college");
-    } catch (err) {
-      console.error("Error submitting evaluation:", err);
+    } catch {
       showToast("Failed to submit evaluation. Please try again.", "error");
     } finally {
       setIsSubmitting(false);
     }
   };
 
+  const handleSubmitClick = () => {
+    if (isSubmitting) return;
+
+    if (!collegeId) {
+      showToast("You must be signed in as a college to submit.", "error");
+      return;
+    }
+
+    if (!isOnline) {
+      showToast(
+        "You are currently offline. Reconnect before submitting.",
+        "error",
+      );
+      return;
+    }
+
+    if (answeredCount === 0) {
+      showToast(
+        "Please answer at least one question before submitting.",
+        "error",
+      );
+      return;
+    }
+
+    if (requiredUnanswered.length > 0) {
+      showToast(
+        `Please answer all required questions (${requiredUnanswered.length} remaining).`,
+        "error",
+      );
+      return;
+    }
+
+    if (existingSession) {
+      setShowOverwriteModal(true);
+    } else {
+      void handleSubmit();
+    }
+  };
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center min-h-[60vh]">
-        <Loading size="lg" text="Loading evaluation questions..." />
+        <Loading size="lg" text="Loading evaluation questions…" />
       </div>
     );
   }
@@ -571,25 +405,15 @@ export default function CollegeEvaluate() {
     return (
       <div className="max-w-2xl mx-auto text-center py-16">
         <div className="bg-red-50 border border-red-200 rounded-xl p-6">
-          <svg
-            className="w-12 h-12 text-red-500 mx-auto mb-4"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={2}
-              d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
-            />
-          </svg>
-          <h2 className="text-lg font-semibold text-red-800 mb-2">
+          <AlertTriangleIcon className="w-12 h-12 text-red-600 mx-auto mb-4" />
+          <h1 className="text-lg font-semibold text-red-900 mb-2">
             Evaluation Not Found
-          </h2>
-          <p className="text-red-600 mb-6">{error}</p>
-          <Link to="/college">
-            <Button>Return to Dashboard</Button>
+          </h1>
+          <p className="text-red-800 max-w-prose mx-auto mb-6">
+            {error || "This area could not be loaded."}
+          </p>
+          <Link to="/college" className={buttonVariants({ variant: "primary" })}>
+            Return to Dashboard
           </Link>
         </div>
       </div>
@@ -597,90 +421,69 @@ export default function CollegeEvaluate() {
   }
 
   return (
-    <div className="animate-fade-in pb-24">
+    <div className="animate-fade-in max-w-4xl mx-auto pb-28 sm:pb-24">
       {/* Area Header */}
-      <div className="bg-linear-to-r from-maroon-800 to-maroon-900 text-white py-8 sm:py-12 -mx-4 sm:-mx-6 lg:-mx-8 px-4 sm:px-6 lg:px-8 -mt-8 mb-8">
+      <div className="bg-linear-to-r from-maroon-800 to-maroon-900 text-white rounded-xl p-6 sm:p-8 mb-6 shadow-sm">
         <Link
           to="/college"
-          className="inline-flex items-center gap-2 text-maroon-200 hover:text-white transition-colors mb-4"
+          className="inline-flex items-center gap-2 min-h-11 -ml-2 px-2 rounded-lg text-maroon-100 hover:text-white transition-colors duration-150 mb-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-white"
         >
-          <svg
-            className="w-4 h-4"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={2}
-              d="M15 19l-7-7 7-7"
-            />
-          </svg>
+          <ArrowLeftIcon className="w-4 h-4" />
           Back to Dashboard
         </Link>
         <div className="flex items-start gap-4">
-          <div className="shrink-0 w-14 h-14 bg-white/10 rounded-xl flex items-center justify-center font-bold text-2xl">
+          <div className="shrink-0 w-14 h-14 bg-white/10 rounded-xl flex items-center justify-center font-bold text-2xl tabular-nums">
             {area.area_number}
           </div>
-          <div>
-            <h1 className="text-2xl sm:text-3xl font-bold mb-2">
+          <div className="min-w-0">
+            <h1 className="text-2xl sm:text-3xl font-bold mb-2 tabular-nums">
               Area {area.area_number}: {area.name}
             </h1>
             {area.description && (
-              <p className="text-maroon-100">{area.description}</p>
+              <p className="text-maroon-100 max-w-prose">{area.description}</p>
             )}
           </div>
         </div>
       </div>
 
-      {/* Progress Bar */}
-      <div className="bg-white border border-gray-200 rounded-lg p-4 mb-6 sticky top-0 z-20">
+      {/* Progress Bar (offset below CollegeLayout sticky h-16 navbar) */}
+      <div className="bg-white border border-gray-200 rounded-xl p-4 mb-6 sticky top-16 z-20 shadow-sm">
         <div className="flex items-center justify-between mb-2">
-          <span className="text-sm font-medium text-gray-700">
-            Progress: {getAnsweredCount()} of {leafQuestions.length} answered
+          <span className="text-sm font-medium text-gray-700 tabular-nums">
+            Progress: {answeredCount} of {leafQuestions.length} answered
           </span>
-          <span className="text-sm text-gray-500">
-            {Math.round(
-              (getAnsweredCount() / Math.max(leafQuestions.length, 1)) * 100
-            )}
-            %
+          <span className="text-sm font-medium text-gray-700 tabular-nums">
+            {progressPercent}%
           </span>
         </div>
-        <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
+        <div
+          role="progressbar"
+          aria-label="Evaluation completion progress"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={progressPercent}
+          className="h-2 bg-gray-200 rounded-full overflow-hidden"
+        >
           <div
-            className="h-full bg-maroon-800 transition-all duration-300 rounded-full"
-            style={{
-              width: `${
-                (getAnsweredCount() / Math.max(leafQuestions.length, 1)) * 100
-              }%`,
-            }}
+            className="h-full w-full bg-maroon-800 origin-left transition-transform duration-200 ease-out rounded-full"
+            style={{ transform: `scaleX(${progressRatio})` }}
           />
         </div>
       </div>
 
       {/* Questions */}
-      <div className="overflow-x-hidden">
+      <div>
         {questionTree.length === 0 ? (
           <Card className="text-center py-12">
-            <svg
-              className="w-16 h-16 text-gray-300 mx-auto mb-4"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-              />
-            </svg>
-            <p className="text-gray-500">
+            <InfoCircleIcon className="w-12 h-12 text-gray-400 mx-auto mb-3" />
+            <p className="text-gray-600 max-w-prose mx-auto mb-5">
               No evaluation questions have been added for this area yet.
             </p>
-            <Link to="/college" className="mt-4 inline-block">
-              <Button variant="secondary">Back to Dashboard</Button>
+            <Link
+              to="/college"
+              className={buttonVariants({ variant: "secondary" })}
+            >
+              Back to Dashboard
             </Link>
           </Card>
         ) : (
@@ -689,10 +492,10 @@ export default function CollegeEvaluate() {
               <QuestionItem
                 key={question.id}
                 question={question}
-                depth={0}
                 responses={responses}
                 onStatusChange={handleStatusChange}
                 onCommentChange={handleCommentChange}
+                disabled={isSubmitting}
               />
             ))}
           </div>
@@ -702,27 +505,42 @@ export default function CollegeEvaluate() {
       {/* Submit Footer */}
       {leafQuestions.length > 0 && (
         <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 shadow-lg z-30">
-          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
-            <div className="flex items-center justify-between gap-4">
-              <div className="text-sm text-gray-600">
-                {getRequiredUnanswered().length > 0 ? (
-                  <span className="text-amber-600">
-                    {getRequiredUnanswered().length} required question(s)
-                    remaining
+          <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-3 sm:py-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="text-sm tabular-nums">
+                {answeredCount === 0 ? (
+                  <span className="text-gray-600">
+                    Answer questions above to submit
+                  </span>
+                ) : requiredUnanswered.length > 0 ? (
+                  <span className="text-amber-800 font-medium">
+                    {requiredUnanswered.length} required question
+                    {requiredUnanswered.length === 1 ? "" : "s"} remaining
                   </span>
                 ) : (
-                  <span className="text-green-600">
-                    All required questions answered ✓
+                  <span className="text-emerald-700 font-medium inline-flex items-center gap-1.5">
+                    <CheckIcon className="w-4 h-4" />
+                    All required questions answered
                   </span>
                 )}
               </div>
               <Button
-                size="lg"
+                type="button"
+                size="md"
                 onClick={handleSubmitClick}
                 isLoading={isSubmitting}
-                disabled={getRequiredUnanswered().length > 0}
+                disabled={
+                  isSubmitting ||
+                  answeredCount === 0 ||
+                  requiredUnanswered.length > 0
+                }
+                className="ml-auto"
               >
-                {existingSession ? "Update Evaluation" : "Submit Evaluation"}
+                {isSubmitting
+                  ? "Submitting…"
+                  : existingSession
+                    ? "Update Evaluation"
+                    : "Submit Evaluation"}
               </Button>
             </div>
           </div>
@@ -732,38 +550,46 @@ export default function CollegeEvaluate() {
       {/* Overwrite Warning Modal */}
       <Modal
         isOpen={showOverwriteModal}
+        preventClose={isSubmitting}
         onClose={() => setShowOverwriteModal(false)}
         title="Update Existing Evaluation?"
         size="md"
+        footer={
+          <>
+            <Button
+              type="button"
+              variant="secondary"
+              disabled={isSubmitting}
+              onClick={() => setShowOverwriteModal(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              onClick={() => void handleSubmit()}
+              isLoading={isSubmitting}
+            >
+              {isSubmitting ? "Updating…" : "Confirm & Update"}
+            </Button>
+          </>
+        }
       >
         <div className="space-y-4">
           <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
             <div className="flex items-start gap-3">
-              <svg
-                className="w-5 h-5 text-amber-600 shrink-0 mt-0.5"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
-                />
-              </svg>
+              <AlertTriangleIcon className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
               <div>
-                <h4 className="font-semibold text-amber-800">
+                <h3 className="font-semibold text-amber-900">
                   Data Override Warning
-                </h4>
-                <p className="text-sm text-amber-700 mt-1">
+                </h3>
+                <p className="text-sm text-amber-800 max-w-prose mt-1">
                   You have already submitted an evaluation for{" "}
                   <strong>
-                    Area {area?.area_number}: {area?.name}
+                    Area {area.area_number}: {area.name}
                   </strong>
                   .
                 </p>
-                <p className="text-sm text-amber-700 mt-2">
+                <p className="text-sm text-amber-800 max-w-prose mt-2">
                   Submitting now will <strong>permanently replace</strong> all
                   previous responses for this area. This action cannot be
                   undone.
@@ -773,25 +599,18 @@ export default function CollegeEvaluate() {
           </div>
 
           {existingSession?.completedAt && (
-            <p className="text-sm text-gray-500">
+            <p className="text-sm text-gray-600 tabular-nums">
               Previous submission:{" "}
               {new Date(existingSession.completedAt).toLocaleDateString()}
             </p>
           )}
-
-          <div className="flex justify-end gap-3 pt-2">
-            <Button
-              variant="secondary"
-              onClick={() => setShowOverwriteModal(false)}
-            >
-              Cancel
-            </Button>
-            <Button onClick={handleSubmit} isLoading={isSubmitting}>
-              Confirm & Update
-            </Button>
-          </div>
         </div>
       </Modal>
     </div>
   );
+}
+
+export default function CollegeEvaluate() {
+  const { areaId } = useParams<{ areaId: string }>();
+  return <CollegeEvaluateInner key={areaId ?? "missing"} areaId={areaId} />;
 }
