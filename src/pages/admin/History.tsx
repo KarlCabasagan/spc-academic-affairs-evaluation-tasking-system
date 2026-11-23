@@ -1,18 +1,39 @@
-import { useEffect, useState } from "react";
-import { supabase } from "../../lib/supabase";
-import * as XLSX from "xlsx";
-import type { ComplianceStatus } from "../../lib/types";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
+import ComplianceAccordion from "../../components/admin/ComplianceAccordion";
+import QuestionComplianceTree from "../../components/admin/QuestionComplianceTree";
 import {
+  AlertTriangleIcon,
   Button,
   Card,
+  ChevronRightIcon,
+  ClockIcon,
+  DownloadIcon,
+  EditIcon,
   Input,
   Loading,
   Modal,
   showToast,
+  TrashIcon,
 } from "../../components/ui";
-import ComplianceAccordion from "../../components/admin/ComplianceAccordion";
-import QuestionComplianceTree from "../../components/admin/QuestionComplianceTree";
-import type { QuestionComplianceNode } from "../../components/admin/QuestionComplianceTree";
+import {
+  type AreaComplianceResult,
+  buildQuestionComplianceTree,
+  calculateAreaCompliance,
+  calculateOverallCompliance,
+  type QuestionComplianceInput,
+  type QuestionComplianceNode,
+  selectLatestSessionsByArea,
+  type SessionWithResponses,
+} from "../../lib/compliance";
+import {
+  type ComplianceWorkbookColumn,
+  type ComplianceWorkbookDetailSheet,
+  type ComplianceWorkbookRow,
+  exportComplianceWorkbook,
+} from "../../lib/excelExport";
+import { buildQuestionTree, getLeafQuestions } from "../../lib/questionTree";
+import { supabase } from "../../lib/supabase";
+import type { ComplianceStatus } from "../../lib/types";
 
 interface HistoryRecord {
   id: string;
@@ -44,38 +65,190 @@ interface HistoryResponse {
   comment: string | null;
 }
 
-interface AreaComplianceData {
-  areaId: string;
+interface ArchivedAreaCompliance {
+  areaKey: string;
   areaNumber: number;
   areaName: string;
-  compliance: number | null;
-  displayState: "no_questions" | "all_na" | "normal";
+  stats: AreaComplianceResult;
   questions: QuestionComplianceNode[];
 }
 
-interface CollegeComplianceData {
-  collegeId: string | null;
+interface ArchivedCollegeCompliance {
+  collegeKey: string;
   collegeName: string;
   collegeCode: string | null;
   overallCompliance: number | null;
-  areas: AreaComplianceData[];
+  areas: ArchivedAreaCompliance[];
 }
 
 interface ExpandedHistoryData {
   historyId: string;
-  colleges: CollegeComplianceData[];
+  colleges: ArchivedCollegeCompliance[];
+}
+
+function formatArchiveDate(dateString: string): string {
+  return new Date(dateString).toLocaleString("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  });
+}
+
+function buildExpandedHistory(
+  historyId: string,
+  sessions: readonly HistorySession[],
+  responses: readonly HistoryResponse[],
+): ExpandedHistoryData {
+  const responsesBySession = new Map<string, HistoryResponse[]>();
+  responses.forEach((r) => {
+    const list = responsesBySession.get(r.history_session_id) || [];
+    list.push(r);
+    responsesBySession.set(r.history_session_id, list);
+  });
+
+  // Sort sessions newest-first so selectLatestSessionsByArea keeps latest submission per (college, area)
+  const sortedSessions = [...sessions].sort((a, b) => {
+    const tA = a.completed_at ? new Date(a.completed_at).getTime() : 0;
+    const tB = b.completed_at ? new Date(b.completed_at).getTime() : 0;
+    return tB - tA;
+  });
+
+  const collegeMeta = new Map<
+    string,
+    { collegeName: string; collegeCode: string | null }
+  >();
+  sortedSessions.forEach((s) => {
+    const collegeKey = s.college_id || `name:${s.college_name || "unknown"}`;
+    if (!collegeMeta.has(collegeKey)) {
+      collegeMeta.set(collegeKey, {
+        collegeName: s.college_name || "Unknown College",
+        collegeCode: s.college_code,
+      });
+    }
+  });
+
+  const questionAreaMap = new Map<string, string>();
+  const areaMeta = new Map<string, { areaNumber: number; areaName: string }>();
+  const areaQuestionsByKey = new Map<
+    string,
+    Map<string, QuestionComplianceInput>
+  >();
+
+  responses.forEach((r) => {
+    const areaKey =
+      r.area_id ||
+      `num:${r.area_number ?? 0}:${(r.area_name || "Unknown Area").toLowerCase()}`;
+    const qKey = r.question_id || r.id;
+
+    questionAreaMap.set(qKey, areaKey);
+    if (!areaMeta.has(areaKey)) {
+      areaMeta.set(areaKey, {
+        areaNumber: r.area_number ?? 0,
+        areaName: r.area_name || "Unknown Area",
+      });
+    }
+
+    let qMap = areaQuestionsByKey.get(areaKey);
+    if (!qMap) {
+      qMap = new Map();
+      areaQuestionsByKey.set(areaKey, qMap);
+    }
+    if (!qMap.has(qKey)) {
+      qMap.set(qKey, {
+        id: qKey,
+        parent_id: r.question_parent_id,
+        question_order: r.question_order ?? 0,
+        question_text: r.question_text || "Archived Question",
+      });
+    }
+  });
+
+  const ssotSessions: SessionWithResponses[] = sortedSessions.map((s) => {
+    const collegeKey = s.college_id || `name:${s.college_name || "unknown"}`;
+    const sessionRows = responsesBySession.get(s.id) || [];
+    return {
+      id: s.id,
+      college_id: collegeKey,
+      completed_at: s.completed_at,
+      is_complete: true,
+      responses: sessionRows.map((r) => ({
+        question_id: r.question_id || r.id,
+        status: r.status,
+        comment: r.comment,
+      })),
+    };
+  });
+
+  const latestByCollege = selectLatestSessionsByArea(
+    ssotSessions,
+    questionAreaMap,
+  );
+
+  const sortedAreas = Array.from(areaMeta.entries()).sort(
+    ([, a], [, b]) => a.areaNumber - b.areaNumber,
+  );
+
+  const colleges: ArchivedCollegeCompliance[] = Array.from(
+    collegeMeta.entries(),
+  )
+    .map(([collegeKey, meta]) => {
+      const collegeAreasMap = latestByCollege.get(collegeKey);
+
+      const areas: ArchivedAreaCompliance[] = [];
+      sortedAreas.forEach(([areaKey, info]) => {
+        const respMap = collegeAreasMap?.get(areaKey);
+        if (!respMap || respMap.size === 0) return;
+
+        // Only include questions actually answered in this college's archive snapshot
+        const rawQuestions = Array.from(
+          areaQuestionsByKey.get(areaKey)?.values() || [],
+        ).filter((q) => respMap.has(q.id));
+
+        const leaves = getLeafQuestions(buildQuestionTree(rawQuestions));
+        const stats = calculateAreaCompliance(leaves, respMap);
+        const questions = buildQuestionComplianceTree(rawQuestions, respMap);
+
+        areas.push({
+          areaKey,
+          areaNumber: info.areaNumber,
+          areaName: info.areaName,
+          stats,
+          questions,
+        });
+      });
+
+      const overallCompliance = calculateOverallCompliance(
+        areas.map((a) => a.stats.compliance),
+      );
+
+      return {
+        collegeKey,
+        collegeName: meta.collegeName,
+        collegeCode: meta.collegeCode,
+        overallCompliance,
+        areas,
+      };
+    })
+    .sort((a, b) => a.collegeName.localeCompare(b.collegeName));
+
+  return { historyId, colleges };
 }
 
 export default function History() {
   const [historyRecords, setHistoryRecords] = useState<HistoryRecord[]>([]);
   const [expandedData, setExpandedData] = useState<
     Map<string, ExpandedHistoryData>
-  >(new Map());
-  const [loadingHistory, setLoadingHistory] = useState<Set<string>>(new Set());
+  >(() => new Map());
+  const [loadingHistory, setLoadingHistory] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [exportingId, setExportingId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState("");
 
-  // Edit name modal state
   const [showEditModal, setShowEditModal] = useState(false);
   const [editingRecord, setEditingRecord] = useState<HistoryRecord | null>(
     null,
@@ -83,7 +256,6 @@ export default function History() {
   const [editName, setEditName] = useState("");
   const [isSavingName, setIsSavingName] = useState(false);
 
-  // Delete confirmation modal state
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [deletingRecord, setDeletingRecord] = useState<HistoryRecord | null>(
     null,
@@ -91,296 +263,131 @@ export default function History() {
   const [isDeleting, setIsDeleting] = useState(false);
 
   useEffect(() => {
-    fetchHistoryRecords();
+    let cancelled = false;
+
+    const fetchHistoryRecords = async () => {
+      try {
+        const { data, error } = await supabase
+          .from("evaluation_history")
+          .select("*")
+          .order("archived_at", { ascending: false });
+
+        if (error) throw error;
+        if (!cancelled) {
+          setHistoryRecords((data || []) as HistoryRecord[]);
+        }
+      } catch {
+        if (!cancelled) {
+          showToast("Failed to load history records.", "error");
+        }
+      } finally {
+        if (!cancelled) {
+          setIsLoading(false);
+        }
+      }
+    };
+
+    void fetchHistoryRecords();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  const fetchHistoryRecords = async () => {
-    try {
-      const { data, error } = await supabase
-        .from("evaluation_history")
-        .select("*")
-        .order("archived_at", { ascending: false });
-
-      if (error) throw error;
-      setHistoryRecords(data || []);
-    } catch (error) {
-      console.error("Error fetching history:", error);
-      showToast("Failed to load history records", "error");
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  // Load detailed data for a history record when expanded
-  const loadHistoryDetails = async (historyId: string) => {
-    if (expandedData.has(historyId)) return; // Already loaded
-    if (loadingHistory.has(historyId)) return; // Already loading
+  const loadHistoryDetails = async (
+    historyId: string,
+  ): Promise<ExpandedHistoryData | null> => {
+    const cached = expandedData.get(historyId);
+    if (cached) return cached;
+    if (loadingHistory.has(historyId)) return null;
 
     setLoadingHistory((prev) => new Set(prev).add(historyId));
 
     try {
-      // Fetch sessions for this history
-      const { data: sessions, error: sessionsError } = await supabase
+      const { data: sessionsData, error: sessionsError } = await supabase
         .from("history_sessions")
         .select("*")
         .eq("history_id", historyId);
 
       if (sessionsError) throw sessionsError;
 
-      // Fetch responses for all sessions
-      const sessionIds = (sessions || []).map((s: HistorySession) => s.id);
-      let responses: HistoryResponse[] = [];
+      const sessions = (sessionsData || []) as HistorySession[];
+      const sessionIds = sessions.map((s) => s.id);
+      const responses: HistoryResponse[] = [];
 
-      if (sessionIds.length > 0) {
-        const { data: responsesData, error: responsesError } = await supabase
+      for (let i = 0; i < sessionIds.length; i += 50) {
+        const { data: chunkData, error: responsesError } = await supabase
           .from("history_responses")
           .select("*")
-          .in("history_session_id", sessionIds);
+          .in("history_session_id", sessionIds.slice(i, i + 50));
 
         if (responsesError) throw responsesError;
-        responses = responsesData || [];
+        if (chunkData) {
+          responses.push(...(chunkData as HistoryResponse[]));
+        }
       }
 
-      // Process data into college -> area -> question structure
-      const collegesMap = new Map<string, CollegeComplianceData>();
-
-      // Group sessions by college
-      (sessions || []).forEach((session: HistorySession) => {
-        const collegeKey = session.college_id || "unknown";
-        if (!collegesMap.has(collegeKey)) {
-          collegesMap.set(collegeKey, {
-            collegeId: session.college_id,
-            collegeName: session.college_name || "Unknown College",
-            collegeCode: session.college_code,
-            overallCompliance: null,
-            areas: [],
-          });
-        }
-      });
-
-      // Group responses by session -> area
-      const sessionResponsesMap = new Map<string, HistoryResponse[]>();
-      responses.forEach((r) => {
-        const existing = sessionResponsesMap.get(r.history_session_id) || [];
-        existing.push(r);
-        sessionResponsesMap.set(r.history_session_id, existing);
-      });
-
-      // Process each college
-      collegesMap.forEach((collegeData, collegeKey) => {
-        // Get sessions for this college
-        const collegeSessions = (sessions || []).filter(
-          (s: HistorySession) => (s.college_id || "unknown") === collegeKey,
-        );
-
-        // Get all responses for this college's sessions
-        const collegeResponses: HistoryResponse[] = [];
-        collegeSessions.forEach((session: HistorySession) => {
-          const sessionResponses = sessionResponsesMap.get(session.id) || [];
-          collegeResponses.push(...sessionResponses);
-        });
-
-        // Group responses by area
-        const areasMap = new Map<string, HistoryResponse[]>();
-        collegeResponses.forEach((r) => {
-          const areaKey = r.area_id || "unknown";
-          const existing = areasMap.get(areaKey) || [];
-          existing.push(r);
-          areasMap.set(areaKey, existing);
-        });
-
-        // Build area compliance data
-        const areasData: AreaComplianceData[] = [];
-        areasMap.forEach((areaResponses, areaKey) => {
-          const firstResponse = areaResponses[0];
-          const questionTree = buildQuestionTree(areaResponses);
-          const areaCompliance = calculateTreeCompliance(questionTree);
-
-          // Determine display state
-          let displayState: "no_questions" | "all_na" | "normal" = "normal";
-          if (questionTree.length === 0) {
-            displayState = "no_questions";
-          } else if (questionTree.every((q) => q.compliance === -1)) {
-            displayState = "all_na";
-          }
-
-          areasData.push({
-            areaId: areaKey,
-            areaNumber: firstResponse?.area_number || 0,
-            areaName: firstResponse?.area_name || "Unknown Area",
-            compliance: areaCompliance,
-            displayState,
-            questions: questionTree,
-          });
-        });
-
-        // Sort areas by area_number
-        areasData.sort((a, b) => a.areaNumber - b.areaNumber);
-
-        // Calculate overall compliance
-        const validAreas = areasData.filter(
-          (a) => a.displayState === "normal" && a.compliance !== null,
-        );
-        collegeData.overallCompliance =
-          validAreas.length > 0
-            ? validAreas.reduce((sum, a) => sum + (a.compliance ?? 0), 0) /
-              validAreas.length
-            : null;
-        collegeData.areas = areasData;
-      });
-
+      const built = buildExpandedHistory(historyId, sessions, responses);
       setExpandedData((prev) => {
-        const newMap = new Map(prev);
-        newMap.set(historyId, {
-          historyId,
-          colleges: Array.from(collegesMap.values()),
-        });
-        return newMap;
+        const next = new Map(prev);
+        next.set(historyId, built);
+        return next;
       });
-    } catch (error) {
-      console.error("Error loading history details:", error);
-      showToast("Failed to load history details", "error");
+      return built;
+    } catch {
+      showToast("Failed to load archived evaluation details.", "error");
+      return null;
     } finally {
       setLoadingHistory((prev) => {
-        const newSet = new Set(prev);
-        newSet.delete(historyId);
-        return newSet;
+        const next = new Set(prev);
+        next.delete(historyId);
+        return next;
       });
     }
   };
 
-  // Build hierarchical question tree from flat responses
-  const buildQuestionTree = (
-    responses: HistoryResponse[],
-  ): QuestionComplianceNode[] => {
-    // Create map of question_id -> response
-    const responseMap = new Map<string, HistoryResponse>();
-    responses.forEach((r) => {
-      if (r.question_id) {
-        responseMap.set(r.question_id, r);
-      }
-    });
-
-    // Find root questions (no parent)
-    const roots = responses.filter((r) => !r.question_parent_id);
-
-    // Recursive function to build tree
-    const buildNode = (
-      response: HistoryResponse,
-      prefix: string,
-      index: number,
-    ): QuestionComplianceNode => {
-      const hierarchicalNumber = prefix
-        ? `${prefix}.${index + 1}`
-        : `${index + 1}`;
-
-      // Find children
-      const children = responses
-        .filter((r) => r.question_parent_id === response.question_id)
-        .sort((a, b) => (a.question_order || 0) - (b.question_order || 0))
-        .map((child, childIndex) =>
-          buildNode(child, hierarchicalNumber, childIndex),
-        );
-
-      const isLeaf = children.length === 0;
-
-      // Calculate compliance
-      let compliance: number;
-      if (isLeaf) {
-        if (response.status === "not_applicable") {
-          compliance = -1; // Sentinel for N/A
-        } else {
-          compliance = response.status === "complied" ? 100 : 0;
-        }
-      } else {
-        const validChildren = children.filter((c) => c.compliance !== -1);
-        if (validChildren.length > 0) {
-          compliance =
-            validChildren.reduce((sum, c) => sum + c.compliance, 0) /
-            validChildren.length;
-        } else {
-          compliance = -1;
-        }
-      }
-
-      return {
-        id: response.question_id || response.id,
-        questionText: response.question_text || "Unknown Question",
-        hierarchicalNumber,
-        response: {
-          status: response.status,
-          comment: response.comment,
-        },
-        compliance,
-        children,
-      };
-    };
-
-    // Sort roots and build tree
-    return roots
-      .sort((a, b) => (a.question_order || 0) - (b.question_order || 0))
-      .map((root, index) => buildNode(root, "", index));
-  };
-
-  // Calculate overall compliance for a question tree
-  const calculateTreeCompliance = (
-    nodes: QuestionComplianceNode[],
-  ): number | null => {
-    if (nodes.length === 0) return null;
-    const validNodes = nodes.filter((n) => n.compliance !== -1);
-    if (validNodes.length === 0) return null;
-    return (
-      validNodes.reduce((sum, n) => sum + n.compliance, 0) / validNodes.length
-    );
-  };
-
-  // Open edit modal
   const openEditModal = (record: HistoryRecord) => {
     setEditingRecord(record);
     setEditName(record.name);
     setShowEditModal(true);
   };
 
-  // Save edited name
-  const handleSaveName = async () => {
-    if (!editingRecord || !editName.trim()) return;
+  const handleSaveName = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!editingRecord || !editName.trim() || isSavingName) return;
 
     setIsSavingName(true);
     try {
+      const nextName = editName.trim();
       const { error } = await supabase
         .from("evaluation_history")
-        .update({ name: editName.trim() })
+        .update({ name: nextName })
         .eq("id", editingRecord.id);
 
       if (error) throw error;
 
-      // Update local state
       setHistoryRecords((prev) =>
         prev.map((r) =>
-          r.id === editingRecord.id ? { ...r, name: editName.trim() } : r,
+          r.id === editingRecord.id ? { ...r, name: nextName } : r,
         ),
       );
-
-      showToast("History name updated", "success");
+      showToast("Archive name updated.", "success");
       setShowEditModal(false);
       setEditingRecord(null);
-    } catch (error) {
-      console.error("Error updating name:", error);
-      showToast("Failed to update name", "error");
+    } catch {
+      showToast("Failed to update archive name.", "error");
     } finally {
       setIsSavingName(false);
     }
   };
 
-  // Open delete modal
   const openDeleteModal = (record: HistoryRecord) => {
     setDeletingRecord(record);
     setShowDeleteModal(true);
   };
 
-  // Delete history record
   const handleDelete = async () => {
-    if (!deletingRecord) return;
+    if (!deletingRecord || isDeleting) return;
 
     setIsDeleting(true);
     try {
@@ -391,246 +398,123 @@ export default function History() {
 
       if (error) throw error;
 
-      // Update local state
       setHistoryRecords((prev) =>
         prev.filter((r) => r.id !== deletingRecord.id),
       );
       setExpandedData((prev) => {
-        const newMap = new Map(prev);
-        newMap.delete(deletingRecord.id);
-        return newMap;
+        const next = new Map(prev);
+        next.delete(deletingRecord.id);
+        return next;
       });
 
-      showToast("History record deleted", "success");
+      showToast("History record deleted.", "success");
       setShowDeleteModal(false);
       setDeletingRecord(null);
-    } catch (error) {
-      console.error("Error deleting history:", error);
-      showToast("Failed to delete history record", "error");
+    } catch {
+      showToast("Failed to delete history record.", "error");
     } finally {
       setIsDeleting(false);
     }
   };
 
-  // Format date for display
-  const formatDate = (dateString: string) => {
-    return new Date(dateString).toLocaleString("en-US", {
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-      hour12: true,
-    });
-  };
+  const exportHistoryToExcel = async (record: HistoryRecord) => {
+    if (exportingId) return;
+    setExportingId(record.id);
 
-  // Export history record to Excel (matching Reports page format)
-  const exportHistoryToExcel = (record: HistoryRecord) => {
-    const data = expandedData.get(record.id);
-    if (!data || data.colleges.length === 0) {
-      showToast("Please expand the record first to load data", "error");
-      return;
-    }
+    try {
+      const data =
+        expandedData.get(record.id) ?? (await loadHistoryDetails(record.id));
+      if (!data || data.colleges.length === 0) {
+        showToast("No archived evaluation data to export.", "error");
+        return;
+      }
 
-    const wb = XLSX.utils.book_new();
+      const allAreas = new Map<
+        string,
+        { areaNumber: number; areaName: string }
+      >();
+      data.colleges.forEach((college) => {
+        college.areas.forEach((area) => {
+          if (!allAreas.has(area.areaKey)) {
+            allAreas.set(area.areaKey, {
+              areaNumber: area.areaNumber,
+              areaName: area.areaName,
+            });
+          }
+        });
+      });
 
-    // ========================================
-    // SHEET 1: Compliance Matrix
-    // ========================================
+      const sortedAreas = Array.from(allAreas.entries()).sort(
+        ([, a], [, b]) => a.areaNumber - b.areaNumber,
+      );
 
-    // Get all unique areas across all colleges
-    const allAreas = new Map<
-      string,
-      { areaNumber: number; areaName: string }
-    >();
-    data.colleges.forEach((college) => {
-      college.areas.forEach((area) => {
-        if (!allAreas.has(area.areaId)) {
-          allAreas.set(area.areaId, {
+      const matrixColumns: ComplianceWorkbookColumn[] = data.colleges.map(
+        (college) => ({
+          id: college.collegeKey,
+          label: college.collegeCode || college.collegeName,
+          overallCompliance: college.overallCompliance,
+        }),
+      );
+
+      const matrixRows: ComplianceWorkbookRow[] = sortedAreas.map(
+        ([areaKey, info]) => {
+          const cells: ComplianceWorkbookRow["cells"] = {};
+          data.colleges.forEach((college) => {
+            const matched = college.areas.find((a) => a.areaKey === areaKey);
+            cells[college.collegeKey] = matched
+              ? {
+                  displayState: matched.stats.displayState,
+                  compliance: matched.stats.compliance,
+                }
+              : {
+                  displayState: "no_response",
+                  compliance: null,
+                };
+          });
+          return {
+            areaLabel: `Area ${info.areaNumber}: ${info.areaName}`,
+            cells,
+          };
+        },
+      );
+
+      const detailSheets: ComplianceWorkbookDetailSheet[] = data.colleges.map(
+        (college) => ({
+          sheetLabel: college.collegeCode || college.collegeName,
+          areas: college.areas.map((area) => ({
             areaNumber: area.areaNumber,
             areaName: area.areaName,
-          });
-        }
-      });
-    });
-
-    // Sort areas by areaNumber
-    const sortedAreas = Array.from(allAreas.entries()).sort(
-      (a, b) => a[1].areaNumber - b[1].areaNumber,
-    );
-
-    // Build matrix headers
-    const matrixHeaders = [
-      "Area",
-      ...data.colleges.map((c) => c.collegeCode || c.collegeName),
-    ];
-
-    // Build matrix rows
-    const matrixRows: (string | number)[][] = sortedAreas.map(
-      ([areaId, areaInfo]) => {
-        const row: (string | number)[] = [
-          `Area ${areaInfo.areaNumber}: ${areaInfo.areaName}`,
-        ];
-        data.colleges.forEach((college) => {
-          const area = college.areas.find((a) => a.areaId === areaId);
-          if (!area) {
-            row.push("—");
-          } else if (area.displayState === "no_questions") {
-            row.push("—");
-          } else if (area.displayState === "all_na") {
-            row.push("N/A");
-          } else {
-            row.push(
-              area.compliance !== null
-                ? `${area.compliance.toFixed(1)}%`
-                : "0.0%",
-            );
-          }
-        });
-        return row;
-      },
-    );
-
-    // Add totals row
-    const totalsRow: (string | number)[] = ["Total Compliance"];
-    data.colleges.forEach((college) => {
-      totalsRow.push(
-        college.overallCompliance !== null
-          ? `${college.overallCompliance.toFixed(1)}%`
-          : "N/A",
+            compliance: area.stats.compliance,
+            displayState: area.stats.displayState,
+            questions: area.questions,
+          })),
+        }),
       );
-    });
-    matrixRows.push(totalsRow);
 
-    const wsMatrix = XLSX.utils.aoa_to_sheet([matrixHeaders, ...matrixRows]);
-    wsMatrix["!cols"] = [
-      { wch: 40 },
-      ...data.colleges.map(() => ({ wch: 15 })),
-    ];
-    XLSX.utils.book_append_sheet(wb, wsMatrix, "Compliance Matrix");
-
-    // ========================================
-    // SHEETS 2+: Per-College Detail Sheets
-    // ========================================
-
-    // Helper to flatten question tree with hierarchical numbers
-    const flattenQuestionTree = (
-      nodes: QuestionComplianceNode[],
-    ): { node: QuestionComplianceNode; isLeaf: boolean }[] => {
-      const result: { node: QuestionComplianceNode; isLeaf: boolean }[] = [];
-      const traverse = (items: QuestionComplianceNode[]) => {
-        items.forEach((item) => {
-          const isLeaf = !item.children || item.children.length === 0;
-          result.push({ node: item, isLeaf });
-          if (item.children && item.children.length > 0) {
-            traverse(item.children);
-          }
-        });
-      };
-      traverse(nodes);
-      return result;
-    };
-
-    data.colleges.forEach((college) => {
-      const detailRows: (string | number)[][] = [];
-      const detailHeaders = ["Area", "Question", "Response", "Comment"];
-
-      college.areas.forEach((areaData, areaIndex) => {
-        if (areaData.questions.length === 0) return;
-
-        const flatQuestions = flattenQuestionTree(areaData.questions);
-
-        // Track compliance for area total
-        let complied = 0;
-        let notComplied = 0;
-
-        flatQuestions.forEach((item, qIndex) => {
-          let statusText = "";
-          if (item.isLeaf && item.node.response) {
-            if (item.node.response.status === "complied") {
-              statusText = "Complied";
-              complied++;
-            } else if (item.node.response.status === "not_complied") {
-              statusText = "Not Complied";
-              notComplied++;
-            } else if (item.node.response.status === "not_applicable") {
-              statusText = "N/A";
-            } else {
-              statusText = "No Response";
-            }
-          }
-
-          // Area name only on first question
-          const areaName =
-            qIndex === 0
-              ? `Area ${areaData.areaNumber}: ${areaData.areaName}`
-              : "";
-
-          detailRows.push([
-            areaName,
-            `${item.node.hierarchicalNumber} ${item.node.questionText}`,
-            statusText,
-            item.isLeaf ? item.node.response?.comment || "" : "",
-          ]);
-        });
-
-        // Add area compliance row
-        const validResponses = complied + notComplied;
-        const areaCompliance =
-          validResponses > 0
-            ? ((complied / validResponses) * 100).toFixed(1) + "%"
-            : "N/A";
-        detailRows.push([
-          `Area ${areaData.areaNumber} Compliance`,
-          "",
-          areaCompliance,
-          "",
-        ]);
-
-        // Blank row between areas
-        if (areaIndex < college.areas.length - 1) {
-          detailRows.push(["", "", "", ""]);
-        }
+      await exportComplianceWorkbook({
+        filenameBase: record.name,
+        matrixColumns,
+        matrixRows,
+        detailSheets,
       });
-
-      // Only create sheet if there's data
-      if (detailRows.length > 0) {
-        const wsDetail = XLSX.utils.aoa_to_sheet([
-          detailHeaders,
-          ...detailRows,
-        ]);
-        wsDetail["!cols"] = [
-          { wch: 35 },
-          { wch: 60 },
-          { wch: 15 },
-          { wch: 40 },
-        ];
-
-        // Sheet name max 31 chars
-        const sheetName = (
-          college.collegeCode || college.collegeName
-        ).substring(0, 31);
-        XLSX.utils.book_append_sheet(wb, wsDetail, sheetName);
-      }
-    });
-
-    // Export
-    const safeName = record.name
-      .replace(/[^a-zA-Z0-9\s-]/g, "")
-      .substring(0, 50);
-    XLSX.writeFile(wb, `${safeName}.xlsx`);
-    showToast("History exported successfully", "success");
+      showToast("Archived evaluation exported successfully.", "success");
+    } catch {
+      showToast("Failed to export archived evaluation.", "error");
+    } finally {
+      setExportingId(null);
+    }
   };
 
-  // Filter records by search term
-  const filteredRecords = historyRecords.filter((r) =>
-    r.name.toLowerCase().includes(searchTerm.toLowerCase()),
-  );
+  const filteredRecords = useMemo(() => {
+    const query = searchTerm.trim().toLowerCase();
+    if (!query) return historyRecords;
+    return historyRecords.filter((r) => r.name.toLowerCase().includes(query));
+  }, [historyRecords, searchTerm]);
 
   if (isLoading) {
     return (
       <div className="flex items-center justify-center py-16">
-        <Loading size="lg" text="Loading history records..." />
+        <Loading size="lg" text="Loading history records…" />
       </div>
     );
   }
@@ -642,8 +526,9 @@ export default function History() {
         <h1 className="text-2xl sm:text-3xl font-bold text-gray-900">
           Evaluation History
         </h1>
-        <p className="text-gray-600 mt-1">
-          View archived evaluation data from previous reset cycles
+        <p className="text-gray-600 max-w-prose mt-1">
+          Inspect and export archived evaluation snapshots from previous reset
+          cycles.
         </p>
       </div>
 
@@ -653,40 +538,29 @@ export default function History() {
           <div className="flex-1 w-full">
             <Input
               label="Search History"
-              placeholder="Search by archive name..."
+              placeholder="Search by archive name…"
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
             />
           </div>
-          <div className="text-sm text-gray-500">
-            Showing {filteredRecords.length} of {historyRecords.length} records
-          </div>
+          <p className="text-sm text-gray-600 tabular-nums">
+            Showing {filteredRecords.length} of {historyRecords.length} record
+            {historyRecords.length === 1 ? "" : "s"}
+          </p>
         </div>
       </Card>
 
       {/* History Records */}
       {filteredRecords.length === 0 ? (
         <Card className="text-center py-12">
-          <svg
-            className="w-16 h-16 text-gray-300 mx-auto mb-4"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={2}
-              d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"
-            />
-          </svg>
-          <h3 className="text-lg font-medium text-gray-900 mb-2">
-            {searchTerm ? "No matching records" : "No history records yet"}
-          </h3>
-          <p className="text-gray-500">
+          <ClockIcon className="w-12 h-12 text-gray-400 mx-auto mb-3" />
+          <h2 className="text-lg font-medium text-gray-900 mb-2">
+            {searchTerm ? "No matching archives" : "No history records yet"}
+          </h2>
+          <p className="text-gray-600 max-w-prose mx-auto">
             {searchTerm
-              ? "Try adjusting your search term"
-              : "History records are created when you reset evaluation data"}
+              ? "Try adjusting your search term."
+              : "Archived snapshots are automatically created when evaluation data is reset."}
           </p>
         </Card>
       ) : (
@@ -697,11 +571,11 @@ export default function History() {
               record={record}
               expandedData={expandedData.get(record.id)}
               isLoading={loadingHistory.has(record.id)}
-              onExpand={() => loadHistoryDetails(record.id)}
+              isExporting={exportingId === record.id}
+              onExpand={() => void loadHistoryDetails(record.id)}
               onEdit={() => openEditModal(record)}
               onDelete={() => openDeleteModal(record)}
-              onExport={() => exportHistoryToExcel(record)}
-              formatDate={formatDate}
+              onExport={() => void exportHistoryToExcel(record)}
             />
           ))}
         </div>
@@ -710,23 +584,19 @@ export default function History() {
       {/* Edit Name Modal */}
       <Modal
         isOpen={showEditModal}
+        preventClose={isSavingName}
         onClose={() => {
           setShowEditModal(false);
           setEditingRecord(null);
         }}
         title="Edit History Name"
         size="sm"
-      >
-        <div className="space-y-4">
-          <Input
-            label="Archive Name"
-            value={editName}
-            onChange={(e) => setEditName(e.target.value)}
-            placeholder="Enter a name for this archive..."
-          />
-          <div className="flex justify-end gap-3">
+        footer={
+          <>
             <Button
+              type="button"
               variant="secondary"
+              disabled={isSavingName}
               onClick={() => {
                 setShowEditModal(false);
                 setEditingRecord(null);
@@ -735,54 +605,44 @@ export default function History() {
               Cancel
             </Button>
             <Button
-              onClick={handleSaveName}
+              type="submit"
+              form="edit-history-name-form"
               isLoading={isSavingName}
               disabled={!editName.trim()}
             >
-              Save
+              {isSavingName ? "Saving…" : "Save"}
             </Button>
-          </div>
-        </div>
+          </>
+        }
+      >
+        <form id="edit-history-name-form" onSubmit={handleSaveName}>
+          <Input
+            label="Archive Name"
+            value={editName}
+            onChange={(e) => setEditName(e.target.value)}
+            placeholder="Enter a name for this archive…"
+            required
+            disabled={isSavingName}
+          />
+        </form>
       </Modal>
 
       {/* Delete Confirmation Modal */}
       <Modal
         isOpen={showDeleteModal}
+        preventClose={isDeleting}
         onClose={() => {
           setShowDeleteModal(false);
           setDeletingRecord(null);
         }}
         title="Delete History Record?"
         size="sm"
-      >
-        <div className="space-y-4">
-          <div className="bg-red-50 border border-red-200 rounded-lg p-4">
-            <div className="flex items-start gap-3">
-              <svg
-                className="w-5 h-5 text-red-600 shrink-0 mt-0.5"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
-                />
-              </svg>
-              <div>
-                <p className="text-sm text-red-700">
-                  This will permanently delete{" "}
-                  <strong>"{deletingRecord?.name}"</strong> and all its archived
-                  data. This action cannot be undone.
-                </p>
-              </div>
-            </div>
-          </div>
-          <div className="flex justify-end gap-3">
+        footer={
+          <>
             <Button
+              type="button"
               variant="secondary"
+              disabled={isDeleting}
               onClick={() => {
                 setShowDeleteModal(false);
                 setDeletingRecord(null);
@@ -791,12 +651,24 @@ export default function History() {
               Cancel
             </Button>
             <Button
+              type="button"
               variant="danger"
-              onClick={handleDelete}
+              onClick={() => void handleDelete()}
               isLoading={isDeleting}
             >
-              Delete
+              {isDeleting ? "Deleting…" : "Delete"}
             </Button>
+          </>
+        }
+      >
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+          <div className="flex items-start gap-3">
+            <AlertTriangleIcon className="w-5 h-5 text-red-700 shrink-0 mt-0.5" />
+            <p className="text-sm text-red-800 max-w-prose">
+              This will permanently delete{" "}
+              <strong>"{deletingRecord?.name}"</strong> and all its archived
+              sessions and responses. This action cannot be undone.
+            </p>
           </div>
         </div>
       </Modal>
@@ -804,27 +676,26 @@ export default function History() {
   );
 }
 
-// Sub-component for history record accordion
 interface HistoryRecordAccordionProps {
   record: HistoryRecord;
   expandedData?: ExpandedHistoryData;
   isLoading: boolean;
+  isExporting: boolean;
   onExpand: () => void;
   onEdit: () => void;
   onDelete: () => void;
   onExport: () => void;
-  formatDate: (date: string) => string;
 }
 
 function HistoryRecordAccordion({
   record,
   expandedData,
   isLoading,
+  isExporting,
   onExpand,
   onEdit,
   onDelete,
   onExport,
-  formatDate,
 }: HistoryRecordAccordionProps) {
   const [isExpanded, setIsExpanded] = useState(false);
 
@@ -832,140 +703,94 @@ function HistoryRecordAccordion({
     if (!isExpanded) {
       onExpand();
     }
-    setIsExpanded(!isExpanded);
+    setIsExpanded((prev) => !prev);
   };
 
   return (
-    <Card className="overflow-hidden">
-      {/* Header */}
-      <div className="flex items-center gap-3 p-4">
+    <Card padding="none" className="overflow-hidden">
+      <div className="flex flex-wrap items-center justify-between gap-3 p-4">
         <button
+          type="button"
+          aria-expanded={isExpanded}
           onClick={handleToggle}
-          className="flex-1 flex items-center gap-3 text-left hover:bg-gray-50 -m-4 p-4 transition-colors"
+          className="flex-1 min-w-0 flex items-center gap-3 text-left rounded-lg p-1.5 -m-1.5 hover:bg-gray-50 transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-maroon-800"
         >
-          {/* Expand Icon */}
-          <svg
-            className={`w-5 h-5 text-gray-400 transition-transform duration-200 shrink-0 ${
+          <ChevronRightIcon
+            className={`w-5 h-5 text-gray-500 transition-transform duration-150 ease-out shrink-0 ${
               isExpanded ? "rotate-90" : ""
             }`}
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={2}
-              d="M9 5l7 7-7 7"
-            />
-          </svg>
+          />
 
-          {/* Clock Icon */}
           <div className="w-10 h-10 rounded-lg bg-maroon-100 text-maroon-800 flex items-center justify-center shrink-0">
-            <svg
-              className="w-5 h-5"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"
-              />
-            </svg>
+            <ClockIcon className="w-5 h-5" />
           </div>
 
-          {/* Title & Meta */}
           <div className="flex-1 min-w-0">
-            <h3 className="font-semibold text-gray-900 truncate">
+            <h2 className="text-base font-semibold text-gray-900 truncate">
               {record.name}
-            </h3>
-            <p className="text-sm text-gray-500">
-              {formatDate(record.archived_at)} • {record.total_sessions}{" "}
+            </h2>
+            <p className="text-sm text-gray-600 tabular-nums mt-0.5">
+              {formatArchiveDate(record.archived_at)} • {record.total_sessions}{" "}
               sessions • {record.total_responses} responses
             </p>
           </div>
         </button>
 
-        {/* Action Buttons */}
-        <div className="flex items-center gap-2 shrink-0">
-          <button
+        <div className="flex items-center gap-1 shrink-0">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
             onClick={onExport}
-            className="p-2 text-gray-500 hover:text-green-600 hover:bg-green-50 rounded-lg transition-colors"
-            title="Export to Excel"
+            isLoading={isExporting}
+            disabled={isExporting}
+            aria-label={`Export ${record.name} to Excel`}
+            className="w-11 h-11 p-0 text-emerald-700 hover:bg-emerald-50"
           >
-            <svg
-              className="w-4 h-4"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
-              />
-            </svg>
-          </button>
-          <button
+            <DownloadIcon className="w-4 h-4" />
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
             onClick={onEdit}
-            className="p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-colors"
-            title="Edit name"
+            aria-label={`Edit name for ${record.name}`}
+            className="w-11 h-11 p-0 text-gray-700"
           >
-            <svg
-              className="w-4 h-4"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
-              />
-            </svg>
-          </button>
-          <button
+            <EditIcon className="w-4 h-4" />
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
             onClick={onDelete}
-            className="p-2 text-gray-500 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
-            title="Delete"
+            aria-label={`Delete ${record.name}`}
+            className="w-11 h-11 p-0 text-red-700 hover:bg-red-50"
           >
-            <svg
-              className="w-4 h-4"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
-              />
-            </svg>
-          </button>
+            <TrashIcon className="w-4 h-4" />
+          </Button>
         </div>
       </div>
 
-      {/* Expanded Content */}
       {isExpanded && (
         <div className="border-t border-gray-200 p-4 bg-gray-50/50">
           {isLoading ? (
             <div className="flex items-center justify-center py-8">
-              <Loading size="md" text="Loading details..." />
+              <Loading size="md" text="Loading archived details…" />
             </div>
           ) : expandedData && expandedData.colleges.length > 0 ? (
             <div className="space-y-3">
               {expandedData.colleges.map((collegeData) => (
                 <ComplianceAccordion
-                  key={collegeData.collegeId || "unknown"}
+                  key={collegeData.collegeKey}
                   title={collegeData.collegeName}
                   subtitle={collegeData.collegeCode || undefined}
                   compliance={collegeData.overallCompliance}
+                  displayState={
+                    collegeData.overallCompliance !== null
+                      ? "percentage"
+                      : "no_response"
+                  }
                   level="college"
                   icon={
                     <div className="w-10 h-10 rounded-lg bg-maroon-100 text-maroon-800 flex items-center justify-center font-bold text-lg">
@@ -975,22 +800,22 @@ function HistoryRecordAccordion({
                   }
                 >
                   {collegeData.areas.length === 0 ? (
-                    <p className="text-gray-500 text-sm py-4">
-                      No evaluation data
+                    <p className="text-gray-600 text-sm py-4">
+                      No evaluation data archived for this college.
                     </p>
                   ) : (
                     <div className="space-y-3">
                       {collegeData.areas.map((areaData) => (
                         <ComplianceAccordion
-                          key={areaData.areaId}
+                          key={areaData.areaKey}
                           title={`Area ${areaData.areaNumber}: ${areaData.areaName}`}
-                          compliance={areaData.compliance}
-                          displayState={areaData.displayState}
+                          compliance={areaData.stats.compliance}
+                          displayState={areaData.stats.displayState}
                           level="area"
                         >
                           {areaData.questions.length === 0 ? (
-                            <p className="text-gray-500 text-sm py-4">
-                              No questions in this area
+                            <p className="text-gray-600 text-sm py-4">
+                              No questions archived in this area.
                             </p>
                           ) : (
                             <div className="space-y-1">
@@ -1014,8 +839,8 @@ function HistoryRecordAccordion({
               ))}
             </div>
           ) : (
-            <p className="text-gray-500 text-sm text-center py-8">
-              No archived data found for this record
+            <p className="text-gray-600 text-sm text-center py-8">
+              No archived evaluation data found for this record.
             </p>
           )}
         </div>

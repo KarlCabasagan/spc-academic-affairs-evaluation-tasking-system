@@ -10,7 +10,7 @@ interface ComplianceAccordionProps {
   title: string;
   subtitle?: string;
   compliance: number | null;
-  displayState?: ComplianceDisplayState | "normal";
+  displayState?: ComplianceDisplayState;
   icon?: ReactNode;
   children: ReactNode;
   level?: "college" | "area";
@@ -34,8 +34,7 @@ export default function ComplianceAccordion({
 
   const tone = getComplianceTone(compliance);
   const toneClasses = COMPLIANCE_TONE_CLASSES[tone];
-  const isPercentageState =
-    displayState === "percentage" || displayState === "normal";
+  const isPercentageState = displayState === "percentage";
 
   const containerClass =
     level === "college"

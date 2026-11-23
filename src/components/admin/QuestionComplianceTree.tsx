@@ -1,32 +1,13 @@
 import { useState } from "react";
-import type { ComplianceStatus } from "../../lib/types";
 import {
   COMPLIANCE_TONE_CLASSES,
   getComplianceTone,
-  type ComplianceDisplayState,
+  type QuestionComplianceNode,
 } from "../../lib/compliance";
 import { CheckIcon, ChevronRightIcon, CloseIcon } from "../ui";
 
-export interface QuestionComplianceNodeBase {
-  id: string;
-  questionText: string;
-  hierarchicalNumber: string;
-  response: {
-    status: ComplianceStatus;
-    comment: string | null;
-  } | null;
-  compliance: number | null;
-  displayState?: ComplianceDisplayState;
-  children: QuestionComplianceNodeBase[];
-}
-
-export interface QuestionComplianceNode extends QuestionComplianceNodeBase {
-  compliance: number;
-  children: QuestionComplianceNode[];
-}
-
 interface QuestionComplianceTreeProps {
-  node: QuestionComplianceNodeBase;
+  node: QuestionComplianceNode;
   depth?: number;
   index?: number;
 }
@@ -77,23 +58,17 @@ export default function QuestionComplianceTree({
   };
 
   const getComplianceBadge = () => {
-    const isNa =
-      node.compliance === null ||
-      node.compliance === -1 ||
-      node.displayState === "all_na";
-
-    if (isNa) {
+    if (node.displayState === "all_na" || node.compliance === null) {
+      if (node.displayState === "no_response") {
+        return (
+          <span className="px-2.5 py-0.5 text-xs font-medium rounded-full bg-gray-100 text-gray-700">
+            No Response
+          </span>
+        );
+      }
       return (
         <span className="px-2.5 py-0.5 text-xs font-medium rounded-full bg-gray-100 text-gray-700">
           N/A
-        </span>
-      );
-    }
-
-    if (node.displayState === "no_response") {
-      return (
-        <span className="px-2.5 py-0.5 text-xs font-medium rounded-full bg-gray-100 text-gray-700">
-          No Response
         </span>
       );
     }
