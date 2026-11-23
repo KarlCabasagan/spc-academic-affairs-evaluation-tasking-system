@@ -1,206 +1,200 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { supabase } from "../../lib/supabase";
+import {
+  AlertCircleIcon,
+  Button,
+  Card,
+  CheckCircleIcon,
+  CheckIcon,
+  ClockIcon,
+  InfoCircleIcon,
+  Loading,
+} from "../../components/ui";
 import { useAuth } from "../../context/useAuth";
-import type { Area, ComplianceStatus } from "../../lib/types";
-import { Card, Loading, showToast } from "../../components/ui";
+import {
+  type AreaComplianceResult,
+  calculateAreaCompliance,
+  calculateOverallCompliance,
+  COMPLIANCE_TONE_CLASSES,
+  getComplianceTone,
+  selectLatestSessionsByArea,
+  type SessionWithResponses,
+} from "../../lib/compliance";
+import { buildQuestionTree, getLeafQuestions } from "../../lib/questionTree";
+import { supabase } from "../../lib/supabase";
+import type { Area } from "../../lib/types";
 
-interface AreaComplianceData {
-  areaId: string;
-  complied: number;
-  notComplied: number;
-  notApplicable: number;
-  compliance: number | null;
-  hasResponses: boolean;
+interface QuestionRow {
+  id: string;
+  area_id: string;
+  parent_id: string | null;
+  question_order: number;
 }
 
 export default function CollegeDashboard() {
   const { college } = useAuth();
+  const collegeId = college?.id;
+
   const [areas, setAreas] = useState<Area[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [completedAreas, setCompletedAreas] = useState<Set<string>>(new Set());
-  const [areaCompliance, setAreaCompliance] = useState<
-    Map<string, AreaComplianceData>
-  >(new Map());
+  const [completedAreaIds, setCompletedAreaIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [areaStats, setAreaStats] = useState<
+    Map<string, AreaComplianceResult>
+  >(() => new Map());
   const [overallCompliance, setOverallCompliance] = useState<number | null>(
     null,
   );
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    fetchData();
-  }, [college]);
+  const loadDashboard = useCallback(
+    async (isCancelled: () => boolean) => {
+      if (!collegeId) return;
 
-  const fetchData = async () => {
-    try {
-      // Fetch active areas
-      const { data: areasData, error: areasError } = await supabase
-        .from("areas")
-        .select("*")
-        .eq("is_active", true)
-        .order("area_number", { ascending: true });
-
-      if (areasError) throw areasError;
-      setAreas(areasData || []);
-
-      // Fetch all questions to identify leaf questions
-      const { data: questionsData } = await supabase
-        .from("questions")
-        .select("id, area_id, parent_id")
-        .eq("is_active", true);
-
-      // Identify leaf questions (no children)
-      const parentIds = new Set(
-        (questionsData || [])
-          .filter((q) => q.parent_id)
-          .map((q) => q.parent_id),
-      );
-      const leafQuestions = (questionsData || []).filter(
-        (q) => !parentIds.has(q.id),
-      );
-      const leafQuestionIds = new Set(leafQuestions.map((q) => q.id));
-      const questionAreaMap = new Map<string, string>();
-      leafQuestions.forEach((q) => {
-        questionAreaMap.set(q.id, q.area_id);
-      });
-
-      // Check which areas have been completed by this college and calculate compliance
-      if (college) {
-        const { data: sessionsData } = await supabase
-          .from("evaluation_sessions")
-          .select(
-            `
-            id,
-            responses (
-              question_id,
-              status,
-              questions (area_id)
+      try {
+        const [areasRes, questionsRes, sessionsRes] = await Promise.all([
+          supabase
+            .from("areas")
+            .select("*")
+            .eq("is_active", true)
+            .order("area_number", { ascending: true }),
+          supabase
+            .from("questions")
+            .select("id, area_id, parent_id, question_order")
+            .eq("is_active", true),
+          supabase
+            .from("evaluation_sessions")
+            .select(
+              "id, college_id, completed_at, is_complete, responses(question_id, status, comment)",
             )
-          `,
-          )
-          .eq("college_id", college.id)
-          .eq("is_complete", true)
-          .order("completed_at", { ascending: false });
+            .eq("college_id", collegeId)
+            .eq("is_complete", true)
+            .order("completed_at", { ascending: false }),
+        ]);
 
-        if (sessionsData) {
-          const completedAreaIds = new Set<string>();
-          const areaResponses = new Map<
-            string,
-            { complied: number; notComplied: number; notApplicable: number }
-          >();
+        if (areasRes.error) throw areasRes.error;
+        if (questionsRes.error) throw questionsRes.error;
+        if (sessionsRes.error) throw sessionsRes.error;
+        if (isCancelled()) return;
 
-          // SSOT: track which areas we've already processed (most recent first)
-          const processedAreas = new Set<string>();
+        const areasData = (areasRes.data || []) as Area[];
+        const questionsData = (questionsRes.data || []) as QuestionRow[];
+        const sessionsData = (sessionsRes.data || []) as SessionWithResponses[];
 
-          sessionsData.forEach((session: any) => {
-            // Group responses by area
-            const sessionAreaResponses = new Map<string, any[]>();
+        const activeAreaIdSet = new Set(areasData.map((a) => a.id));
+        const questionsByArea = new Map<string, QuestionRow[]>();
+        const questionAreaMap = new Map<string, string>();
 
-            session.responses?.forEach((response: any) => {
-              // Only count leaf questions
-              if (!leafQuestionIds.has(response.question_id)) return;
+        questionsData.forEach((q) => {
+          if (!activeAreaIdSet.has(q.area_id)) return;
+          questionAreaMap.set(q.id, q.area_id);
+          const list = questionsByArea.get(q.area_id) || [];
+          list.push(q);
+          questionsByArea.set(q.area_id, list);
+        });
 
-              const areaId = response.questions?.area_id;
-              if (areaId) {
-                completedAreaIds.add(areaId);
-                if (!sessionAreaResponses.has(areaId)) {
-                  sessionAreaResponses.set(areaId, []);
-                }
-                sessionAreaResponses.get(areaId)!.push(response);
-              }
-            });
+        const latestByCollege = selectLatestSessionsByArea(
+          sessionsData,
+          questionAreaMap,
+        );
+        const collegeSessions = latestByCollege.get(collegeId);
 
-            // For each area in this session, if not yet processed, use these responses
-            sessionAreaResponses.forEach((responses, areaId) => {
-              if (!processedAreas.has(areaId)) {
-                processedAreas.add(areaId);
+        const nextCompleted = new Set<string>();
+        const nextStats = new Map<string, AreaComplianceResult>();
 
-                let complied = 0;
-                let notComplied = 0;
-                let notApplicable = 0;
+        areasData.forEach((area) => {
+          const areaQuestions = questionsByArea.get(area.id) || [];
+          const leaves = getLeafQuestions(buildQuestionTree(areaQuestions));
+          const responseMap = collegeSessions?.get(area.id);
 
-                responses.forEach((r) => {
-                  const status = r.status as ComplianceStatus;
-                  if (status === "complied") complied++;
-                  else if (status === "not_complied") notComplied++;
-                  else if (status === "not_applicable") notApplicable++;
-                });
+          if (responseMap && responseMap.size > 0) {
+            nextCompleted.add(area.id);
+            nextStats.set(
+              area.id,
+              calculateAreaCompliance(leaves, responseMap),
+            );
+          }
+        });
 
-                areaResponses.set(areaId, {
-                  complied,
-                  notComplied,
-                  notApplicable,
-                });
-              }
-            });
-          });
+        const overall = calculateOverallCompliance(
+          areasData.map((a) => nextStats.get(a.id)?.compliance ?? null),
+        );
 
-          setCompletedAreas(completedAreaIds);
-
-          // Calculate compliance per area
-          const complianceMap = new Map<string, AreaComplianceData>();
-          let totalComplianceSum = 0;
-          let areaCount = 0;
-
-          areaResponses.forEach((data, areaId) => {
-            const denominator = data.complied + data.notComplied;
-            let compliance: number | null = null;
-
-            if (denominator > 0) {
-              compliance = (data.complied / denominator) * 100;
-              totalComplianceSum += compliance;
-              areaCount++;
-            }
-
-            complianceMap.set(areaId, {
-              areaId,
-              complied: data.complied,
-              notComplied: data.notComplied,
-              notApplicable: data.notApplicable,
-              compliance,
-              hasResponses: true,
-            });
-          });
-
-          setAreaCompliance(complianceMap);
-          setOverallCompliance(
-            areaCount > 0 ? totalComplianceSum / areaCount : null,
+        setAreas(areasData);
+        setCompletedAreaIds(nextCompleted);
+        setAreaStats(nextStats);
+        setOverallCompliance(overall);
+        setError(null);
+      } catch {
+        if (!isCancelled()) {
+          setError(
+            "Unable to load evaluation areas and compliance metrics. Please check your connection and try again.",
           );
         }
+      } finally {
+        if (!isCancelled()) {
+          setIsLoading(false);
+        }
       }
-    } catch (error) {
-      console.error("Error fetching data:", error);
-      showToast("Failed to load evaluation areas", "error");
-    } finally {
-      setIsLoading(false);
-    }
-  };
+    },
+    [collegeId],
+  );
 
-  const getComplianceColor = (compliance: number | null): string => {
-    if (compliance === null) return "text-gray-400";
-    if (compliance >= 80) return "text-emerald-600";
-    if (compliance >= 50) return "text-amber-600";
-    return "text-red-600";
-  };
+  useEffect(() => {
+    if (!collegeId) return;
+    let cancelled = false;
+    void loadDashboard(() => cancelled);
+    return () => {
+      cancelled = true;
+    };
+  }, [collegeId, loadDashboard]);
 
-  const getComplianceBg = (compliance: number | null): string => {
-    if (compliance === null) return "bg-gray-100";
-    if (compliance >= 80) return "bg-emerald-100";
-    if (compliance >= 50) return "bg-amber-100";
-    return "bg-red-100";
+  const handleRetry = () => {
+    setError(null);
+    setIsLoading(true);
+    void loadDashboard(() => false);
   };
 
   if (isLoading) {
     return (
       <div className="flex items-center justify-center py-16">
-        <Loading size="lg" text="Loading evaluation areas..." />
+        <Loading size="lg" text="Loading evaluation areas…" />
       </div>
     );
   }
 
+  if (error) {
+    return (
+      <div className="max-w-xl mx-auto py-12">
+        <Card className="p-6 text-center border border-red-200 bg-red-50/50">
+          <AlertCircleIcon className="w-10 h-10 text-red-600 mx-auto mb-3" />
+          <h1 className="text-lg font-semibold text-gray-900">
+            Dashboard Unavailable
+          </h1>
+          <p
+            role="alert"
+            className="text-sm text-gray-700 max-w-prose mx-auto mt-2 mb-5"
+          >
+            {error}
+          </p>
+          <Button type="button" onClick={handleRetry}>
+            Try Again
+          </Button>
+        </Card>
+      </div>
+    );
+  }
+
+  const completedCount = areas.filter((a) => completedAreaIds.has(a.id)).length;
+  const pendingCount = Math.max(0, areas.length - completedCount);
   const completionRate =
     areas.length > 0
-      ? ((completedAreas.size / areas.length) * 100).toFixed(0)
-      : "0";
+      ? Math.min(100, Math.round((completedCount / areas.length) * 100))
+      : 0;
+
+  const overallTone = getComplianceTone(overallCompliance);
+  const overallStyles = COMPLIANCE_TONE_CLASSES[overallTone];
 
   return (
     <div className="animate-fade-in">
@@ -209,135 +203,84 @@ export default function CollegeDashboard() {
         <h1 className="text-2xl sm:text-3xl font-bold text-gray-900">
           Welcome, {college?.name || "College"}
         </h1>
-        <p className="text-gray-600 mt-1">
-          Select an evaluation area to begin your assessment
+        <p className="text-gray-600 max-w-prose mt-1">
+          Select an evaluation area below to complete or update your
+          self-assessment.
         </p>
       </div>
 
       {/* Summary Metrics */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 mb-8">
-        {/* Overall Compliance */}
         <Card>
-          <div className="flex items-start justify-between">
+          <div className="flex items-start justify-between gap-3">
             <div>
               <p className="text-sm font-medium text-gray-600">
                 Overall Compliance
               </p>
               <p
-                className={`text-3xl font-bold mt-1 ${getComplianceColor(overallCompliance)}`}
+                className={`text-3xl font-bold tabular-nums mt-1 ${overallStyles.text}`}
               >
                 {overallCompliance !== null
                   ? `${overallCompliance.toFixed(1)}%`
                   : "—"}
               </p>
-              <p className="text-sm text-gray-500 mt-1">
-                across {completedAreas.size} areas
+              <p className="text-sm text-gray-600 tabular-nums mt-1">
+                across {completedCount} area{completedCount === 1 ? "" : "s"}
               </p>
             </div>
             <div
-              className={`w-12 h-12 rounded-xl flex items-center justify-center ${getComplianceBg(overallCompliance)}`}
+              className={`w-12 h-12 rounded-xl flex items-center justify-center shrink-0 ${overallStyles.badgeBg}`}
             >
-              <svg
-                className={`w-6 h-6 ${getComplianceColor(overallCompliance)}`}
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
-                />
-              </svg>
+              <CheckCircleIcon className={`w-6 h-6 ${overallStyles.text}`} />
             </div>
           </div>
         </Card>
 
-        {/* Completion Rate */}
         <Card>
-          <div className="flex items-start justify-between">
+          <div className="flex items-start justify-between gap-3">
             <div>
               <p className="text-sm font-medium text-gray-600">
                 Completion Rate
               </p>
-              <p className="text-3xl font-bold text-maroon-800 mt-1">
+              <p className="text-3xl font-bold text-maroon-800 tabular-nums mt-1">
                 {completionRate}%
               </p>
-              <p className="text-sm text-gray-500 mt-1">
-                {completedAreas.size} of {areas.length} areas
+              <p className="text-sm text-gray-600 tabular-nums mt-1">
+                {completedCount} of {areas.length} areas
               </p>
             </div>
-            <div className="w-12 h-12 bg-maroon-100 rounded-xl flex items-center justify-center">
-              <svg
-                className="w-6 h-6 text-maroon-600"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"
-                />
-              </svg>
+            <div className="w-12 h-12 bg-maroon-100 rounded-xl flex items-center justify-center shrink-0">
+              <CheckCircleIcon className="w-6 h-6 text-maroon-800" />
             </div>
           </div>
         </Card>
 
-        {/* Completed Areas */}
         <Card>
-          <div className="flex items-start justify-between">
+          <div className="flex items-start justify-between gap-3">
             <div>
               <p className="text-sm font-medium text-gray-600">Completed</p>
-              <p className="text-3xl font-bold text-green-600 mt-1">
-                {completedAreas.size}
+              <p className="text-3xl font-bold text-emerald-700 tabular-nums mt-1">
+                {completedCount}
               </p>
-              <p className="text-sm text-gray-500 mt-1">areas evaluated</p>
+              <p className="text-sm text-gray-600 mt-1">areas evaluated</p>
             </div>
-            <div className="w-12 h-12 bg-green-100 rounded-xl flex items-center justify-center">
-              <svg
-                className="w-6 h-6 text-green-600"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M5 13l4 4L19 7"
-                />
-              </svg>
+            <div className="w-12 h-12 bg-emerald-100 rounded-xl flex items-center justify-center shrink-0">
+              <CheckIcon className="w-6 h-6 text-emerald-700" />
             </div>
           </div>
         </Card>
 
-        {/* Remaining Areas */}
         <Card>
-          <div className="flex items-start justify-between">
+          <div className="flex items-start justify-between gap-3">
             <div>
               <p className="text-sm font-medium text-gray-600">Remaining</p>
-              <p className="text-3xl font-bold text-amber-600 mt-1">
-                {areas.length - completedAreas.size}
+              <p className="text-3xl font-bold text-amber-800 tabular-nums mt-1">
+                {pendingCount}
               </p>
-              <p className="text-sm text-gray-500 mt-1">areas pending</p>
+              <p className="text-sm text-gray-600 mt-1">areas pending</p>
             </div>
-            <div className="w-12 h-12 bg-amber-100 rounded-xl flex items-center justify-center">
-              <svg
-                className="w-6 h-6 text-amber-600"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"
-                />
-              </svg>
+            <div className="w-12 h-12 bg-amber-100 rounded-xl flex items-center justify-center shrink-0">
+              <ClockIcon className="w-6 h-6 text-amber-800" />
             </div>
           </div>
         </Card>
@@ -346,93 +289,73 @@ export default function CollegeDashboard() {
       {/* Areas Grid */}
       {areas.length === 0 ? (
         <Card className="text-center py-12">
-          <svg
-            className="w-16 h-16 text-gray-300 mx-auto mb-4"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={2}
-              d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"
-            />
-          </svg>
-          <h3 className="text-lg font-medium text-gray-900 mb-2">
+          <InfoCircleIcon className="w-12 h-12 text-gray-400 mx-auto mb-3" />
+          <h2 className="text-lg font-medium text-gray-900 mb-2">
             No evaluation areas available
-          </h3>
-          <p className="text-gray-500">
+          </h2>
+          <p className="text-gray-600 max-w-prose mx-auto">
             Please contact the administrator to set up evaluation areas.
           </p>
         </Card>
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {areas.map((area) => {
-            const isComplete = completedAreas.has(area.id);
-            const areaData = areaCompliance.get(area.id);
-            const compliance = areaData?.compliance ?? null;
+            const isComplete = completedAreaIds.has(area.id);
+            const stats = areaStats.get(area.id);
+            const compliance = stats?.compliance ?? null;
+            const tone = getComplianceTone(compliance);
+            const styles = COMPLIANCE_TONE_CLASSES[tone];
 
             return (
               <Link
                 key={area.id}
                 to={`/college/evaluate/${area.id}`}
-                className="group"
+                className="group block rounded-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-maroon-800"
               >
-                <Card className="h-full transition-all duration-200 hover:shadow-lg hover:border-maroon-300 group-hover:-translate-y-1">
+                <Card hover className="h-full active:scale-[0.98]">
                   <div className="flex items-start gap-4">
                     <div
-                      className={`
-                      shrink-0 w-12 h-12 rounded-xl flex items-center justify-center font-bold text-lg relative
-                      ${
+                      className={`shrink-0 w-12 h-12 rounded-xl flex items-center justify-center font-bold text-lg tabular-nums relative ${
                         isComplete
-                          ? "bg-green-100 text-green-700"
+                          ? "bg-emerald-100 text-emerald-800"
                           : "bg-maroon-100 text-maroon-800"
-                      }
-                    `}
+                      }`}
                     >
                       {area.area_number}
                       {isComplete && (
-                        <div className="absolute -top-1 -right-1 w-5 h-5 bg-green-500 rounded-full flex items-center justify-center">
-                          <svg
-                            className="w-3 h-3 text-white"
-                            fill="none"
-                            stroke="currentColor"
-                            viewBox="0 0 24 24"
-                          >
-                            <path
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                              strokeWidth={3}
-                              d="M5 13l4 4L19 7"
-                            />
-                          </svg>
+                        <div className="absolute -top-1 -right-1 w-5 h-5 bg-emerald-600 rounded-full flex items-center justify-center">
+                          <CheckIcon className="w-3 h-3 text-white" />
                         </div>
                       )}
                     </div>
                     <div className="flex-1 min-w-0">
-                      <h3 className="font-semibold text-gray-900 group-hover:text-maroon-800 transition-colors">
+                      <h2 className="text-base font-semibold text-gray-900 group-hover:text-maroon-800 transition-colors duration-150 tabular-nums">
                         Area {area.area_number}: {area.name}
-                      </h3>
+                      </h2>
                       {area.description && (
-                        <p className="text-sm text-gray-500 mt-1 line-clamp-2">
+                        <p className="text-sm text-gray-600 mt-1 line-clamp-2 max-w-prose">
                           {area.description}
                         </p>
                       )}
                       <div className="mt-3 flex items-center gap-2">
                         {isComplete ? (
-                          <>
-                            <span
-                              className={`text-sm font-medium ${getComplianceColor(compliance)}`}
-                            >
-                              ✓{" "}
-                              {compliance !== null
-                                ? `${compliance.toFixed(1)}% Compliant`
+                          <span
+                            className={`text-sm font-medium inline-flex items-center gap-1 tabular-nums ${
+                              stats?.displayState === "percentage"
+                                ? styles.text
+                                : "text-emerald-700"
+                            }`}
+                          >
+                            <CheckIcon className="w-4 h-4 shrink-0" />
+                            {stats?.displayState === "percentage" &&
+                            compliance !== null
+                              ? `${compliance.toFixed(1)}% Compliant`
+                              : stats?.displayState === "all_na"
+                                ? "Completed (N/A)"
                                 : "Completed"}
-                            </span>
-                          </>
+                          </span>
                         ) : (
-                          <span className="text-sm text-maroon-600 font-medium group-hover:underline">
+                          <span className="text-sm text-maroon-800 font-medium group-hover:text-maroon-900 transition-colors duration-150">
                             Start Evaluation →
                           </span>
                         )}
