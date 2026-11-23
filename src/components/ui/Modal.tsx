@@ -1,5 +1,6 @@
-import { useEffect } from "react";
+import { useEffect, useId, useRef } from "react";
 import Button from "./Button";
+import { CloseIcon } from "./Icons";
 
 interface ModalProps {
   isOpen: boolean;
@@ -8,7 +9,11 @@ interface ModalProps {
   children: React.ReactNode;
   footer?: React.ReactNode;
   size?: "sm" | "md" | "lg";
+  preventClose?: boolean;
 }
+
+const FOCUSABLE_SELECTOR =
+  'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 export default function Modal({
   isOpen,
@@ -17,23 +22,85 @@ export default function Modal({
   children,
   footer,
   size = "md",
+  preventClose = false,
 }: ModalProps) {
-  // Close on escape key
+  const titleId = useId();
+  const panelRef = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  const preventCloseRef = useRef(preventClose);
+
   useEffect(() => {
-    const handleEscape = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+    onCloseRef.current = onClose;
+    preventCloseRef.current = preventClose;
+  }, [onClose, preventClose]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const previouslyFocused =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+
+    // Move focus into the dialog once mounted
+    const focusTimer = window.setTimeout(() => {
+      const panel = panelRef.current;
+      if (!panel) return;
+      const focusables = panel.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR);
+      const firstNonClose = Array.from(focusables).find(
+        (el) => el.getAttribute("aria-label") !== "Close dialog",
+      );
+      (firstNonClose ?? focusables[0] ?? panel).focus();
+    }, 0);
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        if (!preventCloseRef.current) {
+          onCloseRef.current();
+        }
+        return;
+      }
+
+      if (e.key !== "Tab" || !panelRef.current) return;
+
+      const focusables = Array.from(
+        panelRef.current.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
+      ).filter((el) => el.offsetParent !== null);
+
+      if (focusables.length === 0) {
+        e.preventDefault();
+        panelRef.current.focus();
+        return;
+      }
+
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      const active = document.activeElement;
+
+      if (e.shiftKey) {
+        if (active === first || !panelRef.current.contains(active)) {
+          e.preventDefault();
+          last.focus();
+        }
+      } else if (active === last || !panelRef.current.contains(active)) {
+        e.preventDefault();
+        first.focus();
+      }
     };
 
-    if (isOpen) {
-      document.addEventListener("keydown", handleEscape);
-      document.body.style.overflow = "hidden";
-    }
+    document.addEventListener("keydown", handleKeyDown);
 
     return () => {
-      document.removeEventListener("keydown", handleEscape);
-      document.body.style.overflow = "";
+      window.clearTimeout(focusTimer);
+      document.removeEventListener("keydown", handleKeyDown);
+      document.body.style.overflow = prevOverflow;
+      if (previouslyFocused && typeof previouslyFocused.focus === "function") {
+        previouslyFocused.focus();
+      }
     };
-  }, [isOpen, onClose]);
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
@@ -43,40 +110,45 @@ export default function Modal({
     lg: "max-w-2xl",
   };
 
+  const handleBackdropClick = () => {
+    if (!preventClose) {
+      onClose();
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-50 overflow-y-auto">
       {/* Backdrop */}
       <div
-        className="fixed inset-0 bg-black/50 backdrop-blur-sm transition-opacity"
-        onClick={onClose}
+        className="fixed inset-0 bg-black/50 backdrop-blur-sm animate-fade-in"
+        onClick={handleBackdropClick}
+        aria-hidden="true"
       />
 
       {/* Modal */}
       <div className="flex min-h-full items-center justify-center p-4">
         <div
-          className={`relative bg-white rounded-2xl shadow-2xl w-full ${sizes[size]} animate-slide-up`}
+          ref={panelRef}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby={title ? titleId : undefined}
+          tabIndex={-1}
+          className={`relative bg-white rounded-2xl shadow-2xl w-full ${sizes[size]} animate-modal-in focus:outline-none`}
           onClick={(e) => e.stopPropagation()}
         >
           {/* Header */}
           <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-            <h2 className="text-lg font-semibold text-gray-900">{title}</h2>
+            <h2 id={titleId} className="text-lg font-semibold text-gray-900">
+              {title}
+            </h2>
             <button
-              onClick={onClose}
-              className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors"
+              type="button"
+              onClick={() => !preventClose && onClose()}
+              disabled={preventClose}
+              aria-label="Close dialog"
+              className="w-11 h-11 -mr-2 flex items-center justify-center rounded-lg text-gray-500 hover:text-gray-700 hover:bg-gray-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              <svg
-                className="w-5 h-5"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M6 18L18 6M6 6l12 12"
-                />
-              </svg>
+              <CloseIcon />
             </button>
           </div>
 
@@ -95,7 +167,6 @@ export default function Modal({
   );
 }
 
-// Confirmation dialog helper
 interface ConfirmDialogProps {
   isOpen: boolean;
   onClose: () => void;
@@ -123,12 +194,19 @@ export function ConfirmDialog({
       onClose={onClose}
       title={title}
       size="sm"
+      preventClose={isLoading}
       footer={
         <>
-          <Button variant="ghost" onClick={onClose} disabled={isLoading}>
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={onClose}
+            disabled={isLoading}
+          >
             Cancel
           </Button>
           <Button
+            type="button"
             variant={confirmVariant}
             onClick={onConfirm}
             isLoading={isLoading}
@@ -138,7 +216,7 @@ export function ConfirmDialog({
         </>
       }
     >
-      <p className="text-gray-600">{message}</p>
+      <p className="text-gray-600 max-w-prose">{message}</p>
     </Modal>
   );
 }
