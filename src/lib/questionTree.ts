@@ -4,7 +4,10 @@ export interface TreeQuestionInput {
   question_order: number;
 }
 
-export type TreeQuestionNode<T extends TreeQuestionInput> = T & {
+export type TreeQuestionNode<T extends TreeQuestionInput> = Omit<
+  T,
+  "children" | "hierarchical_number"
+> & {
   children: TreeQuestionNode<T>[];
   hierarchical_number: string;
 };
