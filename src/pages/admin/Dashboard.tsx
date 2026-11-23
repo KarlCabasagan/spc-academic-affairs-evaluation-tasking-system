@@ -1,15 +1,58 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
+import {
+  AlertCircleIcon,
+  Button,
+  buttonVariants,
+  Card,
+  CheckCircleIcon,
+  CheckIcon,
+  ChevronRightIcon,
+  ClockIcon,
+  DownloadIcon,
+  InfoCircleIcon,
+  Loading,
+  WifiOffIcon,
+} from "../../components/ui";
+import { useAuth } from "../../context/useAuth";
+import {
+  calculateAreaCompliance,
+  calculateOverallCompliance,
+  COMPLIANCE_TONE_CLASSES,
+  getComplianceTone,
+  selectLatestSessionsByArea,
+  type SessionWithResponses,
+} from "../../lib/compliance";
+import { buildQuestionTree, getLeafQuestions } from "../../lib/questionTree";
 import { supabase } from "../../lib/supabase";
-import { Button, Card, Loading } from "../../components/ui";
 
-interface Stats {
+interface AreaRow {
+  id: string;
+  area_number: number;
+  name: string;
+  is_active: boolean;
+}
+
+interface CollegeRow {
+  id: string;
+  name: string;
+  code: string | null;
+  is_active: boolean;
+}
+
+interface QuestionRow {
+  id: string;
+  area_id: string;
+  parent_id: string | null;
+  question_order: number;
+}
+
+interface DashboardStats {
   totalAreas: number;
   activeAreas: number;
   totalQuestions: number;
   totalColleges: number;
   activeColleges: number;
-  totalEvaluations: number;
   completedEvaluations: number;
   averageCompliance: number | null;
   totalResponses: number;
@@ -22,177 +65,216 @@ interface RecentActivity {
   completedAt: string;
 }
 
+function formatTimeAgo(dateString: string): string {
+  const date = new Date(dateString);
+  const diffMs = Date.now() - date.getTime();
+  const diffMins = Math.floor(diffMs / 60000);
+  const diffHours = Math.floor(diffMs / 3600000);
+  const diffDays = Math.floor(diffMs / 86400000);
+
+  if (diffMins < 1) return "Just now";
+  if (diffMins < 60) return `${diffMins}m ago`;
+  if (diffHours < 24) return `${diffHours}h ago`;
+  return `${diffDays}d ago`;
+}
+
 export default function Dashboard() {
-  const [stats, setStats] = useState<Stats | null>(null);
+  const { isOnline } = useAuth();
+  const [stats, setStats] = useState<DashboardStats | null>(null);
   const [recentActivity, setRecentActivity] = useState<RecentActivity[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
+
+  const fetchIdRef = useRef(0);
+
+  const fetchDashboardData = useCallback(async () => {
+    const currentFetchId = ++fetchIdRef.current;
+
+    try {
+      const [areasRes, collegesRes, questionsRes, sessionsRes] =
+        await Promise.all([
+          supabase
+            .from("areas")
+            .select("id, area_number, name, is_active")
+            .order("area_number", { ascending: true }),
+          supabase.from("colleges").select("id, name, code, is_active"),
+          supabase
+            .from("questions")
+            .select("id, area_id, parent_id, question_order")
+            .eq("is_active", true),
+          supabase
+            .from("evaluation_sessions")
+            .select(
+              "id, college_id, completed_at, is_complete, responses(question_id, status)",
+            )
+            .eq("is_complete", true)
+            .order("completed_at", { ascending: false }),
+        ]);
+
+      if (areasRes.error) throw areasRes.error;
+      if (collegesRes.error) throw collegesRes.error;
+      if (questionsRes.error) throw questionsRes.error;
+      if (sessionsRes.error) throw sessionsRes.error;
+
+      if (currentFetchId !== fetchIdRef.current) return;
+
+      const areasData = (areasRes.data || []) as AreaRow[];
+      const collegesData = (collegesRes.data || []) as CollegeRow[];
+      const questionsData = (questionsRes.data || []) as QuestionRow[];
+      const sessionsData = (sessionsRes.data || []) as SessionWithResponses[];
+
+      const activeAreas = areasData.filter((a) => a.is_active);
+      const activeColleges = collegesData.filter((c) => c.is_active);
+      const activeAreaIds = new Set(activeAreas.map((a) => a.id));
+
+      const questionsByArea = new Map<string, QuestionRow[]>();
+      const questionAreaMap = new Map<string, string>();
+      questionsData.forEach((q) => {
+        if (!activeAreaIds.has(q.area_id)) return;
+        questionAreaMap.set(q.id, q.area_id);
+        const list = questionsByArea.get(q.area_id) || [];
+        list.push(q);
+        questionsByArea.set(q.area_id, list);
+      });
+
+      const leavesByArea = new Map<
+        string,
+        ReturnType<typeof getLeafQuestions<QuestionRow>>
+      >();
+      let totalQuestions = 0;
+      activeAreas.forEach((area) => {
+        const leaves = getLeafQuestions(
+          buildQuestionTree(questionsByArea.get(area.id) || []),
+        );
+        leavesByArea.set(area.id, leaves);
+        totalQuestions += leaves.length;
+      });
+
+      const latestByCollege = selectLatestSessionsByArea(
+        sessionsData,
+        questionAreaMap,
+      );
+
+      let totalResponses = 0;
+      const collegeOverallCompliances = activeColleges.map((col) => {
+        const collegeAreas = latestByCollege.get(col.id);
+        const areaCompliances = activeAreas.map((area) => {
+          const respMap = collegeAreas?.get(area.id);
+          if (!respMap || respMap.size === 0) return null;
+          totalResponses += respMap.size;
+          const result = calculateAreaCompliance(
+            leavesByArea.get(area.id) || [],
+            respMap,
+          );
+          return result.displayState === "percentage"
+            ? result.compliance
+            : null;
+        });
+        return calculateOverallCompliance(areaCompliances);
+      });
+
+      const averageCompliance = calculateOverallCompliance(
+        collegeOverallCompliances,
+      );
+
+      const collegeById = new Map(collegesData.map((c) => [c.id, c]));
+      const recent: RecentActivity[] = [];
+      for (const session of sessionsData) {
+        if (!session.college_id || !session.completed_at) continue;
+        const college = collegeById.get(session.college_id);
+        if (!college) continue;
+        recent.push({
+          id: session.id,
+          collegeName: college.name,
+          collegeCode: college.code,
+          completedAt: session.completed_at,
+        });
+        if (recent.length >= 5) break;
+      }
+
+      setStats({
+        totalAreas: areasData.length,
+        activeAreas: activeAreas.length,
+        totalQuestions,
+        totalColleges: collegesData.length,
+        activeColleges: activeColleges.length,
+        completedEvaluations: sessionsData.length,
+        averageCompliance,
+        totalResponses,
+      });
+      setRecentActivity(recent);
+      setLastSyncedAt(new Date().toLocaleTimeString());
+      setError(null);
+    } catch {
+      if (currentFetchId === fetchIdRef.current) {
+        setError("Failed to refresh dashboard metrics.");
+      }
+    } finally {
+      if (currentFetchId === fetchIdRef.current) {
+        setIsLoading(false);
+      }
+    }
+  }, []);
 
   useEffect(() => {
-    fetchDashboardData();
+    void fetchDashboardData();
 
-    // Set up real-time subscriptions
-    const sessionsChannel = supabase
-      .channel("dashboard-sessions")
+    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleRefresh = () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        void fetchDashboardData();
+      }, 500);
+    };
+
+    const channel = supabase
+      .channel("admin-dashboard-updates")
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "evaluation_sessions" },
-        () => {
-          fetchDashboardData();
-        }
+        scheduleRefresh,
       )
-      .subscribe();
-
-    const responsesChannel = supabase
-      .channel("dashboard-responses")
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "responses" },
-        () => {
-          fetchDashboardData();
-        }
+        scheduleRefresh,
+      )
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "colleges" },
+        scheduleRefresh,
+      )
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "areas" },
+        scheduleRefresh,
       )
       .subscribe();
 
     return () => {
-      supabase.removeChannel(sessionsChannel);
-      supabase.removeChannel(responsesChannel);
+      if (debounceTimer) clearTimeout(debounceTimer);
+      void supabase.removeChannel(channel);
     };
-  }, []);
+  }, [fetchDashboardData]);
 
-  const fetchDashboardData = async () => {
-    try {
-      // Fetch areas count
-      const { count: totalAreas } = await supabase
-        .from("areas")
-        .select("*", { count: "exact", head: true });
-
-      const { count: activeAreas } = await supabase
-        .from("areas")
-        .select("*", { count: "exact", head: true })
-        .eq("is_active", true);
-
-      // Fetch colleges count
-      const { count: totalColleges } = await supabase
-        .from("colleges")
-        .select("*", { count: "exact", head: true });
-
-      const { count: activeColleges } = await supabase
-        .from("colleges")
-        .select("*", { count: "exact", head: true })
-        .eq("is_active", true);
-
-      // Fetch leaf questions count
-      const { data: allQuestions } = await supabase
-        .from("questions")
-        .select("id, parent_id")
-        .eq("is_active", true);
-
-      const parentIds = new Set(
-        (allQuestions || []).filter((q) => q.parent_id).map((q) => q.parent_id)
-      );
-      const leafQuestions = (allQuestions || []).filter(
-        (q) => !parentIds.has(q.id)
-      );
-      const totalQuestions = leafQuestions.length;
-
-      // Fetch evaluations count
-      const { count: totalEvaluations } = await supabase
-        .from("evaluation_sessions")
-        .select("*", { count: "exact", head: true });
-
-      const { count: completedEvaluations } = await supabase
-        .from("evaluation_sessions")
-        .select("*", { count: "exact", head: true })
-        .eq("is_complete", true);
-
-      // Fetch responses for average compliance and total count
-      const { data: responses, count: totalResponses } = await supabase
-        .from("responses")
-        .select("status", { count: "exact" });
-
-      let averageCompliance: number | null = null;
-      if (responses && responses.length > 0) {
-        const validResponses = responses.filter(
-          (r) => r.status === "complied" || r.status === "not_complied"
-        );
-        if (validResponses.length > 0) {
-          const compliedCount = validResponses.filter(
-            (r) => r.status === "complied"
-          ).length;
-          averageCompliance = (compliedCount / validResponses.length) * 100;
-        }
-      }
-
-      // Fetch recent activity
-      const { data: recentSessions } = await supabase
-        .from("evaluation_sessions")
-        .select(
-          `
-          id,
-          completed_at,
-          colleges (name, code)
-        `
-        )
-        .eq("is_complete", true)
-        .order("completed_at", { ascending: false })
-        .limit(5);
-
-      const recent: RecentActivity[] = (recentSessions || [])
-        .filter((s) => s.colleges && s.completed_at)
-        .map((s) => {
-          const college = s.colleges as unknown as {
-            name: string;
-            code: string | null;
-          };
-          return {
-            id: s.id,
-            collegeName: college.name,
-            collegeCode: college.code,
-            completedAt: s.completed_at!,
-          };
-        });
-
-      setStats({
-        totalAreas: totalAreas || 0,
-        activeAreas: activeAreas || 0,
-        totalQuestions,
-        totalColleges: totalColleges || 0,
-        activeColleges: activeColleges || 0,
-        totalEvaluations: totalEvaluations || 0,
-        completedEvaluations: completedEvaluations || 0,
-        averageCompliance,
-        totalResponses: totalResponses || 0,
-      });
-
-      setRecentActivity(recent);
-    } catch (error) {
-      console.error("Error fetching dashboard data:", error);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const formatTimeAgo = (dateString: string) => {
-    const date = new Date(dateString);
-    const now = new Date();
-    const diffMs = now.getTime() - date.getTime();
-    const diffMins = Math.floor(diffMs / 60000);
-    const diffHours = Math.floor(diffMs / 3600000);
-    const diffDays = Math.floor(diffMs / 86400000);
-
-    if (diffMins < 1) return "Just now";
-    if (diffMins < 60) return `${diffMins}m ago`;
-    if (diffHours < 24) return `${diffHours}h ago`;
-    return `${diffDays}d ago`;
+  const handleRetry = () => {
+    setError(null);
+    setIsLoading(true);
+    void fetchDashboardData();
   };
 
   if (isLoading) {
     return (
       <div className="flex items-center justify-center py-16">
-        <Loading size="lg" text="Loading dashboard..." />
+        <Loading size="lg" text="Loading dashboard…" />
       </div>
     );
   }
+
+  const avgCompliance = stats?.averageCompliance ?? null;
+  const avgTone = getComplianceTone(avgCompliance);
+  const avgStyles = COMPLIANCE_TONE_CLASSES[avgTone];
 
   return (
     <div className="animate-fade-in">
@@ -201,145 +283,104 @@ export default function Dashboard() {
         <h1 className="text-2xl sm:text-3xl font-bold text-gray-900">
           Admin Dashboard
         </h1>
-        <p className="text-gray-600 mt-1">
-          Overview of the PACUCOA Evaluation Tasking System
+        <p className="text-gray-600 max-w-prose mt-1">
+          Overview of the SPC Academic Affairs PACUCOA Evaluation Tasking System.
         </p>
       </div>
 
+      {error && (
+        <Card className="p-4 mb-6 border border-red-200 bg-red-50/70">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5 text-sm text-red-800">
+              <AlertCircleIcon className="w-5 h-5 text-red-600 shrink-0" />
+              <span role="alert">{error}</span>
+            </div>
+            <Button
+              type="button"
+              size="sm"
+              variant="secondary"
+              onClick={handleRetry}
+            >
+              Retry
+            </Button>
+          </div>
+        </Card>
+      )}
+
       {/* Key Metrics Grid */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 mb-8">
-        {/* Colleges */}
         <Card>
-          <div className="flex items-start justify-between">
+          <div className="flex items-start justify-between gap-3">
             <div>
               <p className="text-sm font-medium text-gray-600">Colleges</p>
-              <p className="text-3xl font-bold text-gray-900 mt-1">
-                {stats?.activeColleges || 0}
+              <p className="text-3xl font-bold text-gray-900 tabular-nums mt-1">
+                {stats?.activeColleges ?? 0}
               </p>
-              <p className="text-sm text-gray-500 mt-1">
-                {stats?.totalColleges || 0} total
+              <p className="text-sm text-gray-600 tabular-nums mt-1">
+                {stats?.totalColleges ?? 0} total enrolled
               </p>
             </div>
-            <div className="w-12 h-12 bg-maroon-100 rounded-xl flex items-center justify-center">
-              <svg
-                className="w-6 h-6 text-maroon-600"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"
-                />
-              </svg>
+            <div className="w-12 h-12 bg-maroon-100 rounded-xl flex items-center justify-center shrink-0">
+              <CheckCircleIcon className="w-6 h-6 text-maroon-800" />
             </div>
           </div>
         </Card>
 
-        {/* Average Compliance */}
         <Card>
-          <div className="flex items-start justify-between">
+          <div className="flex items-start justify-between gap-3">
             <div>
               <p className="text-sm font-medium text-gray-600">
                 Avg. Compliance
               </p>
               <p
-                className={`text-3xl font-bold mt-1 ${
-                  stats && stats.averageCompliance !== null
-                    ? stats.averageCompliance >= 80
-                      ? "text-emerald-600"
-                      : stats.averageCompliance >= 50
-                      ? "text-amber-600"
-                      : "text-red-600"
-                    : "text-gray-400"
-                }`}
+                className={`text-3xl font-bold tabular-nums mt-1 ${avgStyles.text}`}
               >
-                {stats && stats.averageCompliance !== null
-                  ? `${stats.averageCompliance.toFixed(1)}%`
-                  : "—"}
+                {avgCompliance !== null ? `${avgCompliance.toFixed(1)}%` : "—"}
               </p>
-              <p className="text-sm text-gray-500 mt-1">
-                {stats?.completedEvaluations || 0} submissions
+              <p className="text-sm text-gray-600 tabular-nums mt-1">
+                {stats?.completedEvaluations ?? 0} submissions
               </p>
             </div>
-            <div className="w-12 h-12 bg-emerald-100 rounded-xl flex items-center justify-center">
-              <svg
-                className="w-6 h-6 text-emerald-600"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
-                />
-              </svg>
+            <div
+              className={`w-12 h-12 rounded-xl flex items-center justify-center shrink-0 ${avgStyles.badgeBg}`}
+            >
+              <CheckIcon className={`w-6 h-6 ${avgStyles.text}`} />
             </div>
           </div>
         </Card>
 
-        {/* Areas */}
         <Card>
-          <div className="flex items-start justify-between">
+          <div className="flex items-start justify-between gap-3">
             <div>
               <p className="text-sm font-medium text-gray-600">Areas</p>
-              <p className="text-3xl font-bold text-gray-900 mt-1">
-                {stats?.activeAreas || 0}
+              <p className="text-3xl font-bold text-gray-900 tabular-nums mt-1">
+                {stats?.activeAreas ?? 0}
               </p>
-              <p className="text-sm text-gray-500 mt-1">
-                {stats?.totalQuestions || 0} questions
+              <p className="text-sm text-gray-600 tabular-nums mt-1">
+                {stats?.totalQuestions ?? 0} active criteria
               </p>
             </div>
-            <div className="w-12 h-12 bg-blue-100 rounded-xl flex items-center justify-center">
-              <svg
-                className="w-6 h-6 text-blue-600"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"
-                />
-              </svg>
+            <div className="w-12 h-12 bg-blue-100 rounded-xl flex items-center justify-center shrink-0">
+              <InfoCircleIcon className="w-6 h-6 text-blue-700" />
             </div>
           </div>
         </Card>
 
-        {/* Total Responses */}
         <Card>
-          <div className="flex items-start justify-between">
+          <div className="flex items-start justify-between gap-3">
             <div>
               <p className="text-sm font-medium text-gray-600">
-                Total Responses
+                Active Responses
               </p>
-              <p className="text-3xl font-bold text-gray-900 mt-1">
-                {stats?.totalResponses.toLocaleString() || 0}
+              <p className="text-3xl font-bold text-gray-900 tabular-nums mt-1">
+                {(stats?.totalResponses ?? 0).toLocaleString()}
               </p>
-              <p className="text-sm text-gray-500 mt-1">
-                from {stats?.completedEvaluations || 0} submissions
+              <p className="text-sm text-gray-600 tabular-nums mt-1">
+                across latest submissions
               </p>
             </div>
-            <div className="w-12 h-12 bg-purple-100 rounded-xl flex items-center justify-center">
-              <svg
-                className="w-6 h-6 text-purple-600"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
-                />
-              </svg>
+            <div className="w-12 h-12 bg-purple-100 rounded-xl flex items-center justify-center shrink-0">
+              <ClockIcon className="w-6 h-6 text-purple-700" />
             </div>
           </div>
         </Card>
@@ -353,161 +394,83 @@ export default function Dashboard() {
             Quick Actions
           </h2>
           <div className="grid gap-3">
-            <Link to="/admin/colleges">
-              <Card hover className="flex items-center gap-4">
-                <div className="w-10 h-10 bg-maroon-100 text-maroon-800 rounded-lg flex items-center justify-center">
-                  <svg
-                    className="w-5 h-5"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={2}
-                      d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"
-                    />
-                  </svg>
+            <Link
+              to="/admin/colleges"
+              className="group block rounded-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-maroon-800"
+            >
+              <Card hover className="flex items-center gap-4 active:scale-[0.98]">
+                <div className="w-10 h-10 bg-maroon-100 text-maroon-800 rounded-lg flex items-center justify-center shrink-0">
+                  <CheckCircleIcon className="w-5 h-5" />
                 </div>
-                <div className="flex-1">
-                  <h3 className="font-medium text-gray-900">Manage Colleges</h3>
-                  <p className="text-sm text-gray-500">
-                    Add or edit college accounts
-                  </p>
-                </div>
-                <svg
-                  className="w-5 h-5 text-gray-400"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M9 5l7 7-7 7"
-                  />
-                </svg>
-              </Card>
-            </Link>
-
-            <Link to="/admin/questions">
-              <Card hover className="flex items-center gap-4">
-                <div className="w-10 h-10 bg-blue-100 text-blue-600 rounded-lg flex items-center justify-center">
-                  <svg
-                    className="w-5 h-5"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={2}
-                      d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-                    />
-                  </svg>
-                </div>
-                <div className="flex-1">
-                  <h3 className="font-medium text-gray-900">
-                    Manage Questions
+                <div className="flex-1 min-w-0">
+                  <h3 className="font-medium text-gray-900 group-hover:text-maroon-800 transition-colors duration-150">
+                    Manage Colleges
                   </h3>
-                  <p className="text-sm text-gray-500">
-                    Edit evaluation criteria
+                  <p className="text-sm text-gray-600">
+                    Add or edit participating college accounts
                   </p>
                 </div>
-                <svg
-                  className="w-5 h-5 text-gray-400"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M9 5l7 7-7 7"
-                  />
-                </svg>
+                <ChevronRightIcon className="w-5 h-5 text-gray-500 group-hover:text-maroon-800 transition-colors duration-150 shrink-0" />
               </Card>
             </Link>
 
-            <Link to="/admin/responses">
-              <Card hover className="flex items-center gap-4">
-                <div className="w-10 h-10 bg-emerald-100 text-emerald-600 rounded-lg flex items-center justify-center">
-                  <svg
-                    className="w-5 h-5"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={2}
-                      d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"
-                    />
-                  </svg>
+            <Link
+              to="/admin/areas"
+              className="group block rounded-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-maroon-800"
+            >
+              <Card hover className="flex items-center gap-4 active:scale-[0.98]">
+                <div className="w-10 h-10 bg-blue-100 text-blue-700 rounded-lg flex items-center justify-center shrink-0">
+                  <InfoCircleIcon className="w-5 h-5" />
                 </div>
-                <div className="flex-1">
-                  <h3 className="font-medium text-gray-900">View Analytics</h3>
-                  <p className="text-sm text-gray-500">
-                    Compliance by college & area
+                <div className="flex-1 min-w-0">
+                  <h3 className="font-medium text-gray-900 group-hover:text-maroon-800 transition-colors duration-150">
+                    Manage Areas &amp; Questions
+                  </h3>
+                  <p className="text-sm text-gray-600">
+                    Edit evaluation areas and accreditation criteria
                   </p>
                 </div>
-                <svg
-                  className="w-5 h-5 text-gray-400"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M9 5l7 7-7 7"
-                  />
-                </svg>
+                <ChevronRightIcon className="w-5 h-5 text-gray-500 group-hover:text-maroon-800 transition-colors duration-150 shrink-0" />
               </Card>
             </Link>
 
-            <Link to="/admin/reports">
-              <Card hover className="flex items-center gap-4">
-                <div className="w-10 h-10 bg-amber-100 text-amber-600 rounded-lg flex items-center justify-center">
-                  <svg
-                    className="w-5 h-5"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={2}
-                      d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
-                    />
-                  </svg>
+            <Link
+              to="/admin/responses"
+              className="group block rounded-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-maroon-800"
+            >
+              <Card hover className="flex items-center gap-4 active:scale-[0.98]">
+                <div className="w-10 h-10 bg-emerald-100 text-emerald-700 rounded-lg flex items-center justify-center shrink-0">
+                  <CheckIcon className="w-5 h-5" />
                 </div>
-                <div className="flex-1">
-                  <h3 className="font-medium text-gray-900">Export Reports</h3>
-                  <p className="text-sm text-gray-500">
-                    Download compliance matrix
+                <div className="flex-1 min-w-0">
+                  <h3 className="font-medium text-gray-900 group-hover:text-maroon-800 transition-colors duration-150">
+                    View Responses &amp; Analytics
+                  </h3>
+                  <p className="text-sm text-gray-600">
+                    Inspect itemized compliance by college and area
                   </p>
                 </div>
-                <svg
-                  className="w-5 h-5 text-gray-400"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M9 5l7 7-7 7"
-                  />
-                </svg>
+                <ChevronRightIcon className="w-5 h-5 text-gray-500 group-hover:text-maroon-800 transition-colors duration-150 shrink-0" />
+              </Card>
+            </Link>
+
+            <Link
+              to="/admin/reports"
+              className="group block rounded-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-maroon-800"
+            >
+              <Card hover className="flex items-center gap-4 active:scale-[0.98]">
+                <div className="w-10 h-10 bg-amber-100 text-amber-800 rounded-lg flex items-center justify-center shrink-0">
+                  <DownloadIcon className="w-5 h-5" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <h3 className="font-medium text-gray-900 group-hover:text-maroon-800 transition-colors duration-150">
+                    Export Compliance Matrix
+                  </h3>
+                  <p className="text-sm text-gray-600">
+                    Download summary and per-college Excel workbooks
+                  </p>
+                </div>
+                <ChevronRightIcon className="w-5 h-5 text-gray-500 group-hover:text-maroon-800 transition-colors duration-150 shrink-0" />
               </Card>
             </Link>
           </div>
@@ -521,22 +484,11 @@ export default function Dashboard() {
           <Card>
             {recentActivity.length === 0 ? (
               <div className="text-center py-8">
-                <svg
-                  className="w-12 h-12 text-gray-300 mx-auto mb-3"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"
-                  />
-                </svg>
-                <p className="text-gray-500">No submissions yet</p>
-                <p className="text-sm text-gray-400 mt-1">
-                  Recent evaluations will appear here
+                <InfoCircleIcon className="w-10 h-10 text-gray-400 mx-auto mb-3" />
+                <p className="text-gray-700 font-medium">No submissions yet</p>
+                <p className="text-sm text-gray-600 mt-1 max-w-prose mx-auto">
+                  Completed college evaluations will appear here as they are
+                  submitted.
                 </p>
               </div>
             ) : (
@@ -546,30 +498,18 @@ export default function Dashboard() {
                     key={activity.id}
                     className="flex items-center gap-3 py-3 first:pt-0 last:pb-0"
                   >
-                    <div className="w-8 h-8 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center shrink-0">
-                      <svg
-                        className="w-4 h-4"
-                        fill="none"
-                        stroke="currentColor"
-                        viewBox="0 0 24 24"
-                      >
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          strokeWidth={2}
-                          d="M5 13l4 4L19 7"
-                        />
-                      </svg>
+                    <div className="w-8 h-8 bg-emerald-100 text-emerald-700 rounded-full flex items-center justify-center shrink-0">
+                      <CheckIcon className="w-4 h-4" />
                     </div>
                     <div className="flex-1 min-w-0">
                       <p className="font-medium text-gray-900 truncate">
                         {activity.collegeName}
                       </p>
-                      <p className="text-sm text-gray-500">
+                      <p className="text-sm text-gray-600">
                         {activity.collegeCode || "Completed evaluation"}
                       </p>
                     </div>
-                    <span className="text-sm text-gray-400 shrink-0">
+                    <span className="text-sm text-gray-600 tabular-nums shrink-0">
                       {formatTimeAgo(activity.completedAt)}
                     </span>
                   </div>
@@ -578,10 +518,15 @@ export default function Dashboard() {
             )}
             {recentActivity.length > 0 && (
               <div className="mt-4 pt-4 border-t border-gray-100">
-                <Link to="/admin/responses">
-                  <Button variant="secondary" size="sm" className="w-full">
-                    View All Submissions
-                  </Button>
+                <Link
+                  to="/admin/responses"
+                  className={buttonVariants({
+                    variant: "secondary",
+                    size: "sm",
+                    className: "w-full",
+                  })}
+                >
+                  View All Submissions
                 </Link>
               </div>
             )}
@@ -589,18 +534,48 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* System Status */}
+      {/* Real Connection & System Status */}
       <Card variant="bordered" className="bg-gray-50 border-gray-200">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-3 h-3 bg-emerald-500 rounded-full animate-pulse" />
-            <span className="text-sm font-medium text-gray-700">
-              System Status: Active
-            </span>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5">
+            {error ? (
+              <>
+                <span
+                  className="w-2.5 h-2.5 bg-red-600 rounded-full shrink-0"
+                  aria-hidden="true"
+                />
+                <span className="text-sm font-medium text-red-800">
+                  Sync Issue: Metrics could not be refreshed
+                </span>
+              </>
+            ) : !isOnline ? (
+              <>
+                <WifiOffIcon className="w-4 h-4 text-amber-700 shrink-0" />
+                <span className="text-sm font-medium text-amber-900">
+                  Offline: Showing last synced data
+                </span>
+              </>
+            ) : (
+              <>
+                <span
+                  className="w-2.5 h-2.5 bg-emerald-600 rounded-full shrink-0"
+                  aria-hidden="true"
+                />
+                <span className="text-sm font-medium text-gray-800">
+                  Connected
+                  {lastSyncedAt && (
+                    <span className="font-normal text-gray-600 tabular-nums">
+                      {" "}
+                      • Last synced {lastSyncedAt}
+                    </span>
+                  )}
+                </span>
+              </>
+            )}
           </div>
-          <span className="text-sm text-gray-500">
-            {stats?.activeColleges || 0} colleges enrolled •{" "}
-            {stats?.activeAreas || 0} areas active
+          <span className="text-sm text-gray-600 tabular-nums">
+            {stats?.activeColleges ?? 0} colleges enrolled •{" "}
+            {stats?.activeAreas ?? 0} areas active
           </span>
         </div>
       </Card>
