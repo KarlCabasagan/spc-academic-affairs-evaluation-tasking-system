@@ -1,82 +1,76 @@
-import { useState, useEffect, useCallback } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { supabase } from "../lib/supabase";
-import type { Area, Question, ComplianceStatus } from "../lib/types";
+import type { Area, Question } from "../lib/types";
+import { calculateOverallCompliance as calcOverallCompliance } from "../lib/compliance";
+import {
+  type AllResponses,
+  type AreaResponses,
+  type StoredResponse,
+  isAreaArray,
+  isFiniteNumber,
+  isQuestionsCache,
+  isResponseMap,
+  isStringArray,
+  readStorageJson,
+  removeStorageKey,
+  writeStorageJson,
+} from "../lib/offlineStorage";
 
-// LocalStorage keys
+export type { AllResponses, AreaResponses, StoredResponse };
+
 const STORAGE_KEYS = {
   AREAS_CACHE: "evaluation_areas_cache",
   QUESTIONS_CACHE: "evaluation_questions_cache",
   QUESTIONS_LAST_SYNC: "evaluation_questions_last_sync",
   RESPONSES: "evaluation_responses",
   COMPLETED_AREAS: "evaluation_completed_areas",
-};
-
-export interface StoredResponse {
-  questionId: string;
-  status: ComplianceStatus;
-  comment: string;
-  answered: boolean;
-}
-
-export interface AreaResponses {
-  [questionId: string]: StoredResponse;
-}
-
-export interface AllResponses {
-  [areaId: string]: AreaResponses;
-}
+} as const;
 
 export interface QuestionsCache {
   [areaId: string]: Question[];
 }
 
-// Helper functions for localStorage
-const getFromStorage = <T>(key: string, defaultValue: T): T => {
-  try {
-    const item = localStorage.getItem(key);
-    return item ? JSON.parse(item) : defaultValue;
-  } catch {
-    return defaultValue;
-  }
-};
-
-const setToStorage = <T>(key: string, value: T): void => {
-  try {
-    localStorage.setItem(key, JSON.stringify(value));
-  } catch (e) {
-    console.error("Failed to save to localStorage:", e);
-  }
-};
-
 export function useOfflineEvaluation() {
-  const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [isOnline, setIsOnline] = useState(
+    typeof navigator !== "undefined" ? navigator.onLine : true,
+  );
   const [areas, setAreas] = useState<Area[]>([]);
-  const [completedAreas, setCompletedAreas] = useState<string[]>([]);
+  const [completedAreas, setCompletedAreas] = useState<string[]>(() =>
+    readStorageJson(STORAGE_KEYS.COMPLETED_AREAS, isStringArray, []),
+  );
   const [isLoading, setIsLoading] = useState(true);
 
-  // Monitor online status
   useEffect(() => {
     const handleOnline = () => setIsOnline(true);
     const handleOffline = () => setIsOnline(false);
 
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key === STORAGE_KEYS.COMPLETED_AREAS || event.key === null) {
+        setCompletedAreas(
+          readStorageJson(STORAGE_KEYS.COMPLETED_AREAS, isStringArray, []),
+        );
+      }
+    };
+
     window.addEventListener("online", handleOnline);
     window.addEventListener("offline", handleOffline);
+    window.addEventListener("storage", handleStorage);
 
     return () => {
       window.removeEventListener("online", handleOnline);
       window.removeEventListener("offline", handleOffline);
+      window.removeEventListener("storage", handleStorage);
     };
   }, []);
 
-  // Load completed areas from localStorage
-  useEffect(() => {
-    const stored = getFromStorage<string[]>(STORAGE_KEYS.COMPLETED_AREAS, []);
-    setCompletedAreas(stored);
-  }, []);
-
-  // Fetch areas with offline support
   const fetchAreas = useCallback(async () => {
     setIsLoading(true);
+    const cachedAreas = readStorageJson(
+      STORAGE_KEYS.AREAS_CACHE,
+      isAreaArray,
+      [],
+    );
+
     try {
       if (isOnline) {
         const { data, error } = await supabase
@@ -89,26 +83,27 @@ export function useOfflineEvaluation() {
 
         const areasData = data || [];
         setAreas(areasData);
-        // Cache for offline use
-        setToStorage(STORAGE_KEYS.AREAS_CACHE, areasData);
+        if (areasData.length > 0 || cachedAreas.length === 0) {
+          writeStorageJson(STORAGE_KEYS.AREAS_CACHE, areasData);
+        }
       } else {
-        // Load from cache when offline
-        const cached = getFromStorage<Area[]>(STORAGE_KEYS.AREAS_CACHE, []);
-        setAreas(cached);
+        setAreas(cachedAreas);
       }
-    } catch (error) {
-      console.error("Error fetching areas:", error);
-      // Fall back to cache on error
-      const cached = getFromStorage<Area[]>(STORAGE_KEYS.AREAS_CACHE, []);
-      setAreas(cached);
+    } catch {
+      setAreas(cachedAreas);
     } finally {
       setIsLoading(false);
     }
   }, [isOnline]);
 
-  // Fetch questions for a specific area with offline support
   const fetchQuestions = useCallback(
     async (areaId: string): Promise<Question[]> => {
+      const cache = readStorageJson<QuestionsCache>(
+        STORAGE_KEYS.QUESTIONS_CACHE,
+        isQuestionsCache,
+        {},
+      );
+
       try {
         if (isOnline) {
           const { data, error } = await supabase
@@ -121,42 +116,25 @@ export function useOfflineEvaluation() {
           if (error) throw error;
 
           const questionsData = data || [];
-          // Cache for offline use
-          const cache = getFromStorage<QuestionsCache>(
-            STORAGE_KEYS.QUESTIONS_CACHE,
-            {},
-          );
-          cache[areaId] = questionsData;
-          setToStorage(STORAGE_KEYS.QUESTIONS_CACHE, cache);
-
+          const nextCache: QuestionsCache = {
+            ...cache,
+            [areaId]: questionsData,
+          };
+          writeStorageJson(STORAGE_KEYS.QUESTIONS_CACHE, nextCache);
           return questionsData;
-        } else {
-          // Load from cache when offline
-          const cache = getFromStorage<QuestionsCache>(
-            STORAGE_KEYS.QUESTIONS_CACHE,
-            {},
-          );
-          return cache[areaId] || [];
         }
-      } catch (error) {
-        console.error("Error fetching questions:", error);
-        // Fall back to cache on error
-        const cache = getFromStorage<QuestionsCache>(
-          STORAGE_KEYS.QUESTIONS_CACHE,
-          {},
-        );
+        return cache[areaId] || [];
+      } catch {
         return cache[areaId] || [];
       }
     },
     [isOnline],
   );
 
-  // Prefetch ALL questions from ALL areas (for offline support)
   const prefetchAllQuestions = useCallback(async () => {
     if (!isOnline) return;
 
     try {
-      // Fetch all active questions at once
       const { data: allQuestions, error } = await supabase
         .from("questions")
         .select("*")
@@ -165,7 +143,6 @@ export function useOfflineEvaluation() {
 
       if (error) throw error;
 
-      // Group by area_id
       const cache: QuestionsCache = {};
       (allQuestions || []).forEach((q: Question) => {
         if (!cache[q.area_id]) {
@@ -174,75 +151,69 @@ export function useOfflineEvaluation() {
         cache[q.area_id].push(q);
       });
 
-      // Save to localStorage
-      setToStorage(STORAGE_KEYS.QUESTIONS_CACHE, cache);
-      setToStorage(STORAGE_KEYS.QUESTIONS_LAST_SYNC, Date.now());
-
-      console.log(
-        `Prefetched ${allQuestions?.length || 0} questions for offline use`,
-      );
-    } catch (error) {
-      console.error("Error prefetching questions:", error);
+      const saved = writeStorageJson(STORAGE_KEYS.QUESTIONS_CACHE, cache);
+      if (saved) {
+        writeStorageJson(STORAGE_KEYS.QUESTIONS_LAST_SYNC, Date.now());
+      }
+    } catch {
+      // Cache stays at previous valid snapshot on transient fetch failure
     }
   }, [isOnline]);
 
-  // Sync questions cache when coming back online
   useEffect(() => {
-    if (isOnline) {
-      // Check if we need to sync (sync every 5 minutes max)
-      const lastSync = getFromStorage<number>(
-        STORAGE_KEYS.QUESTIONS_LAST_SYNC,
-        0,
-      );
-      const fiveMinutes = 5 * 60 * 1000;
-
-      if (Date.now() - lastSync > fiveMinutes) {
-        prefetchAllQuestions();
-      }
+    if (!isOnline) return;
+    const lastSync = readStorageJson(
+      STORAGE_KEYS.QUESTIONS_LAST_SYNC,
+      isFiniteNumber,
+      0,
+    );
+    const fiveMinutes = 5 * 60 * 1000;
+    if (Date.now() - lastSync > fiveMinutes) {
+      void prefetchAllQuestions();
     }
   }, [isOnline, prefetchAllQuestions]);
 
-  // Get responses for a specific area
   const getResponses = useCallback((areaId: string): AreaResponses => {
-    const allResponses = getFromStorage<AllResponses>(
+    const allResponses = readStorageJson(
       STORAGE_KEYS.RESPONSES,
+      isResponseMap,
       {},
     );
     return allResponses[areaId] || {};
   }, []);
 
-  // Save responses for a specific area
   const saveResponses = useCallback(
-    (areaId: string, responses: AreaResponses) => {
-      const allResponses = getFromStorage<AllResponses>(
+    (areaId: string, responses: AreaResponses): boolean => {
+      const allResponses = readStorageJson(
         STORAGE_KEYS.RESPONSES,
+        isResponseMap,
         {},
       );
-      allResponses[areaId] = responses;
-      setToStorage(STORAGE_KEYS.RESPONSES, allResponses);
+      const nextResponses: AllResponses = {
+        ...allResponses,
+        [areaId]: responses,
+      };
+      return writeStorageJson(STORAGE_KEYS.RESPONSES, nextResponses);
     },
     [],
   );
 
-  // Mark area as completed
-  const markAreaComplete = useCallback((areaId: string) => {
-    const stored = getFromStorage<string[]>(STORAGE_KEYS.COMPLETED_AREAS, []);
-    if (!stored.includes(areaId)) {
-      const updated = [...stored, areaId];
-      setToStorage(STORAGE_KEYS.COMPLETED_AREAS, updated);
+  const markAreaComplete = useCallback((areaId: string): boolean => {
+    const stored = readStorageJson(
+      STORAGE_KEYS.COMPLETED_AREAS,
+      isStringArray,
+      [],
+    );
+    if (stored.includes(areaId)) return true;
+
+    const updated = [...stored, areaId];
+    const saved = writeStorageJson(STORAGE_KEYS.COMPLETED_AREAS, updated);
+    if (saved) {
       setCompletedAreas(updated);
     }
+    return saved;
   }, []);
 
-  // Unmark area as completed (for editing)
-  const unmarkAreaComplete = useCallback((areaId: string) => {
-    const stored = getFromStorage<string[]>(STORAGE_KEYS.COMPLETED_AREAS, []);
-    const updated = stored.filter((id) => id !== areaId);
-    setToStorage(STORAGE_KEYS.COMPLETED_AREAS, updated);
-    setCompletedAreas(updated);
-  }, []);
-
-  // Check if area is completed
   const isAreaCompleted = useCallback(
     (areaId: string): boolean => {
       return completedAreas.includes(areaId);
@@ -250,69 +221,62 @@ export function useOfflineEvaluation() {
     [completedAreas],
   );
 
-  // Clear responses for a specific area
-  const clearAreaResponses = useCallback((areaId: string) => {
-    const allResponses = getFromStorage<AllResponses>(
+  const clearAreaResponses = useCallback((areaId: string): boolean => {
+    const allResponses = readStorageJson(
       STORAGE_KEYS.RESPONSES,
+      isResponseMap,
       {},
     );
-    delete allResponses[areaId];
-    setToStorage(STORAGE_KEYS.RESPONSES, allResponses);
+    const nextResponses: AllResponses = { ...allResponses };
+    delete nextResponses[areaId];
+    const responsesSaved = writeStorageJson(
+      STORAGE_KEYS.RESPONSES,
+      nextResponses,
+    );
 
-    // Also unmark as completed
-    const stored = getFromStorage<string[]>(STORAGE_KEYS.COMPLETED_AREAS, []);
+    const stored = readStorageJson(
+      STORAGE_KEYS.COMPLETED_AREAS,
+      isStringArray,
+      [],
+    );
     const updated = stored.filter((id) => id !== areaId);
-    setToStorage(STORAGE_KEYS.COMPLETED_AREAS, updated);
-    setCompletedAreas(updated);
+    const completedSaved = writeStorageJson(
+      STORAGE_KEYS.COMPLETED_AREAS,
+      updated,
+    );
+    if (completedSaved) {
+      setCompletedAreas(updated);
+    }
+
+    return responsesSaved && completedSaved;
   }, []);
 
-  // Clear all data
-  const clearAllData = useCallback(() => {
-    localStorage.removeItem(STORAGE_KEYS.RESPONSES);
-    localStorage.removeItem(STORAGE_KEYS.COMPLETED_AREAS);
+  const clearAllData = useCallback((): boolean => {
+    const r = removeStorageKey(STORAGE_KEYS.RESPONSES);
+    const c = removeStorageKey(STORAGE_KEYS.COMPLETED_AREAS);
     setCompletedAreas([]);
+    return r && c;
   }, []);
 
-  // Get all responses (for export)
   const getAllResponses = useCallback((): AllResponses => {
-    return getFromStorage<AllResponses>(STORAGE_KEYS.RESPONSES, {});
+    return readStorageJson(STORAGE_KEYS.RESPONSES, isResponseMap, {});
   }, []);
 
-  // Calculate compliance for an area (excluding N/A)
-  const calculateAreaCompliance = useCallback(
-    (areaResponses: AreaResponses): number | null => {
-      const responses = Object.values(areaResponses).filter((r) => r.answered);
-      const validResponses = responses.filter(
-        (r) => r.status !== "not_applicable",
-      );
-
-      if (validResponses.length === 0) return null;
-
-      const complied = validResponses.filter(
-        (r) => r.status === "complied",
-      ).length;
-      return (complied / validResponses.length) * 100;
-    },
-    [],
-  );
-
-  // Calculate overall compliance across all areas
+  // Kept only until ExportPage migrates to compliance.ts SSOT
   const calculateOverallCompliance = useCallback((): number | null => {
     const allResponses = getAllResponses();
-    const areaCompliances: number[] = [];
-
-    Object.values(allResponses).forEach((areaResponses) => {
-      const compliance = calculateAreaCompliance(areaResponses);
-      if (compliance !== null) {
-        areaCompliances.push(compliance);
-      }
+    const areaCompliances = Object.values(allResponses).map((areaResponses) => {
+      const applicable = Object.values(areaResponses).filter(
+        (r) => r.answered && r.status !== "not_applicable",
+      );
+      if (applicable.length === 0) return null;
+      const complied = applicable.filter(
+        (r) => r.status === "complied",
+      ).length;
+      return (complied / applicable.length) * 100;
     });
-
-    if (areaCompliances.length === 0) return null;
-    return (
-      areaCompliances.reduce((sum, c) => sum + c, 0) / areaCompliances.length
-    );
-  }, [getAllResponses, calculateAreaCompliance]);
+    return calcOverallCompliance(areaCompliances);
+  }, [getAllResponses]);
 
   return {
     isOnline,
@@ -325,12 +289,10 @@ export function useOfflineEvaluation() {
     getResponses,
     saveResponses,
     markAreaComplete,
-    unmarkAreaComplete,
     isAreaCompleted,
     clearAreaResponses,
     clearAllData,
     getAllResponses,
-    calculateAreaCompliance,
     calculateOverallCompliance,
   };
 }
