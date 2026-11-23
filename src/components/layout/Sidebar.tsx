@@ -1,8 +1,19 @@
-import { useState } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "../../context/useAuth";
-import { supabase } from "../../lib/supabase";
-import { Button, Modal, showToast } from "../ui";
+import { supabase, supabaseNoPersist } from "../../lib/supabase";
+import {
+  AlertCircleIcon,
+  Button,
+  ClockIcon,
+  CloseIcon,
+  EyeIcon,
+  Input,
+  KeyIcon,
+  LogoutIcon,
+  Modal,
+  showToast,
+} from "../ui";
 
 interface SidebarProps {
   isOpen: boolean;
@@ -12,6 +23,13 @@ interface SidebarProps {
 export default function Sidebar({ isOpen, onClose }: SidebarProps) {
   const { user, signOut } = useAuth();
   const navigate = useNavigate();
+  const asideRef = useRef<HTMLElement>(null);
+
+  const [isDesktop, setIsDesktop] = useState(() =>
+    typeof window !== "undefined"
+      ? window.matchMedia("(min-width: 1024px)").matches
+      : true,
+  );
 
   // Change password modal state
   const [showPasswordModal, setShowPasswordModal] = useState(false);
@@ -21,73 +39,34 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
   const [isChangingPassword, setIsChangingPassword] = useState(false);
   const [passwordError, setPasswordError] = useState("");
 
+  useEffect(() => {
+    const mq = window.matchMedia("(min-width: 1024px)");
+    const handleChange = () => setIsDesktop(mq.matches);
+    handleChange();
+    mq.addEventListener("change", handleChange);
+    return () => mq.removeEventListener("change", handleChange);
+  }, []);
+
+  useEffect(() => {
+    if (asideRef.current) {
+      asideRef.current.inert = !isDesktop && !isOpen;
+    }
+  }, [isDesktop, isOpen]);
+
+  useEffect(() => {
+    if (!isOpen || isDesktop) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isOpen, isDesktop, onClose]);
+
   const handleSignOut = async () => {
     await signOut();
     navigate("/admin/login");
-  };
-
-  const handleChangePassword = async () => {
-    setPasswordError("");
-
-    // Validation
-    if (!currentPassword.trim()) {
-      setPasswordError("Please enter your current password");
-      return;
-    }
-
-    if (!newPassword.trim()) {
-      setPasswordError("Please enter a new password");
-      return;
-    }
-
-    if (newPassword.length < 6) {
-      setPasswordError("New password must be at least 6 characters");
-      return;
-    }
-
-    if (newPassword !== confirmNewPassword) {
-      setPasswordError("New passwords do not match");
-      return;
-    }
-
-    if (currentPassword === newPassword) {
-      setPasswordError("New password must be different from current password");
-      return;
-    }
-
-    setIsChangingPassword(true);
-
-    try {
-      // First verify the current password by attempting to sign in
-      const { error: authError } = await supabase.auth.signInWithPassword({
-        email: user?.email || "",
-        password: currentPassword,
-      });
-
-      if (authError) {
-        setPasswordError("Current password is incorrect");
-        return;
-      }
-
-      // Now update the password
-      const { error: updateError } = await supabase.auth.updateUser({
-        password: newPassword,
-      });
-
-      if (updateError) {
-        setPasswordError(updateError.message || "Failed to update password");
-        return;
-      }
-
-      showToast("Password changed successfully", "success");
-      setShowPasswordModal(false);
-      resetPasswordForm();
-    } catch (error) {
-      console.error("Error changing password:", error);
-      setPasswordError("An unexpected error occurred. Please try again.");
-    } finally {
-      setIsChangingPassword(false);
-    }
   };
 
   const resetPasswordForm = () => {
@@ -97,16 +76,86 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
     setPasswordError("");
   };
 
+  const handleChangePassword = async (e: FormEvent) => {
+    e.preventDefault();
+    setPasswordError("");
+
+    if (!currentPassword.trim()) {
+      setPasswordError("Please enter your current password.");
+      return;
+    }
+
+    if (!newPassword.trim()) {
+      setPasswordError("Please enter a new password.");
+      return;
+    }
+
+    if (newPassword.length < 8) {
+      setPasswordError("New password must be at least 8 characters long.");
+      return;
+    }
+
+    if (newPassword !== confirmNewPassword) {
+      setPasswordError("New passwords do not match.");
+      return;
+    }
+
+    if (currentPassword === newPassword) {
+      setPasswordError(
+        "New password must be different from your current password.",
+      );
+      return;
+    }
+
+    if (!user?.email) {
+      setPasswordError("Unable to verify account email. Please sign in again.");
+      return;
+    }
+
+    setIsChangingPassword(true);
+
+    try {
+      const { error: authError } =
+        await supabaseNoPersist.auth.signInWithPassword({
+          email: user.email,
+          password: currentPassword,
+        });
+
+      if (authError) {
+        setPasswordError("Current password is incorrect.");
+        return;
+      }
+
+      const { error: updateError } = await supabase.auth.updateUser({
+        password: newPassword,
+      });
+
+      if (updateError) {
+        setPasswordError(updateError.message || "Failed to update password.");
+        return;
+      }
+
+      showToast("Password changed successfully.", "success");
+      setShowPasswordModal(false);
+      resetPasswordForm();
+    } catch {
+      setPasswordError("An unexpected error occurred. Please try again.");
+    } finally {
+      setIsChangingPassword(false);
+    }
+  };
+
   const navItems = [
     {
       label: "Dashboard",
       path: "/admin/dashboard",
       icon: (
         <svg
-          className="w-5 h-5"
+          className="w-5 h-5 shrink-0"
           fill="none"
           stroke="currentColor"
           viewBox="0 0 24 24"
+          aria-hidden="true"
         >
           <path
             strokeLinecap="round"
@@ -122,10 +171,11 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
       path: "/admin/areas",
       icon: (
         <svg
-          className="w-5 h-5"
+          className="w-5 h-5 shrink-0"
           fill="none"
           stroke="currentColor"
           viewBox="0 0 24 24"
+          aria-hidden="true"
         >
           <path
             strokeLinecap="round"
@@ -141,10 +191,11 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
       path: "/admin/colleges",
       icon: (
         <svg
-          className="w-5 h-5"
+          className="w-5 h-5 shrink-0"
           fill="none"
           stroke="currentColor"
           viewBox="0 0 24 24"
+          aria-hidden="true"
         >
           <path
             strokeLinecap="round"
@@ -160,10 +211,11 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
       path: "/admin/responses",
       icon: (
         <svg
-          className="w-5 h-5"
+          className="w-5 h-5 shrink-0"
           fill="none"
           stroke="currentColor"
           viewBox="0 0 24 24"
+          aria-hidden="true"
         >
           <path
             strokeLinecap="round"
@@ -179,10 +231,11 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
       path: "/admin/reports",
       icon: (
         <svg
-          className="w-5 h-5"
+          className="w-5 h-5 shrink-0"
           fill="none"
           stroke="currentColor"
           viewBox="0 0 24 24"
+          aria-hidden="true"
         >
           <path
             strokeLinecap="round"
@@ -196,46 +249,12 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
     {
       label: "History",
       path: "/admin/history",
-      icon: (
-        <svg
-          className="w-5 h-5"
-          fill="none"
-          stroke="currentColor"
-          viewBox="0 0 24 24"
-        >
-          <path
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            strokeWidth={2}
-            d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"
-          />
-        </svg>
-      ),
+      icon: <ClockIcon className="w-5 h-5 shrink-0" />,
     },
     {
       label: "Preview as College",
       path: "/admin/preview-college",
-      icon: (
-        <svg
-          className="w-5 h-5"
-          fill="none"
-          stroke="currentColor"
-          viewBox="0 0 24 24"
-        >
-          <path
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            strokeWidth={2}
-            d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
-          />
-          <path
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            strokeWidth={2}
-            d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"
-          />
-        </svg>
-      ),
+      icon: <EyeIcon className="w-5 h-5 shrink-0" />,
     },
   ];
 
@@ -246,49 +265,65 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
         <div
           className="fixed inset-0 bg-black/50 z-40 lg:hidden"
           onClick={onClose}
+          aria-hidden="true"
         />
       )}
 
       {/* Sidebar */}
       <aside
-        className={`
-        fixed top-0 left-0 h-full w-64 bg-white border-r border-gray-200 z-50
-        transform transition-transform duration-300 ease-in-out
-        lg:translate-x-0 lg:static lg:z-auto
-        ${isOpen ? "translate-x-0" : "-translate-x-full"}
-      `}
+        id="admin-sidebar"
+        ref={asideRef}
+        aria-label="Admin sidebar"
+        className={`fixed top-0 left-0 h-full w-64 bg-white border-r border-gray-200 z-50 transform transition-transform duration-200 ease-[cubic-bezier(0.16,1,0.3,1)] lg:translate-x-0 lg:static lg:z-auto ${
+          isOpen ? "translate-x-0" : "-translate-x-full"
+        }`}
       >
         <div className="flex flex-col h-full">
           {/* Header */}
-          <div className="px-6 py-5 border-b border-gray-100">
-            <div className="flex items-center gap-3">
+          <div className="px-5 py-5 border-b border-gray-100 flex items-center justify-between gap-2">
+            <div className="flex items-center gap-3 min-w-0">
               <img
                 src="/spc-logo.png"
                 alt="SPC Logo"
-                className="w-10 h-10 object-contain"
+                className="w-10 h-10 object-contain shrink-0"
               />
-              <div>
-                <h2 className="font-semibold text-gray-900">Admin Panel</h2>
-                <p className="text-xs text-gray-500">PACUCOA Evaluation</p>
+              <div className="min-w-0">
+                <span className="font-semibold text-gray-900 block truncate">
+                  Admin Panel
+                </span>
+                <p className="text-xs text-gray-500 truncate">
+                  PACUCOA Evaluation
+                </p>
               </div>
             </div>
+
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Close navigation menu"
+              className="lg:hidden w-11 h-11 inline-flex items-center justify-center rounded-lg text-gray-500 hover:text-gray-800 hover:bg-gray-100 active:scale-[0.97] transition-[background-color,color,transform] duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-maroon-800 shrink-0"
+            >
+              <CloseIcon className="w-5 h-5" />
+            </button>
           </div>
 
           {/* Navigation */}
-          <nav className="flex-1 px-4 py-6 space-y-1 overflow-y-auto">
+          <nav
+            aria-label="Admin navigation"
+            className="flex-1 px-4 py-6 space-y-1 overflow-y-auto"
+          >
             {navItems.map((item) => (
               <NavLink
                 key={item.path}
                 to={item.path}
                 onClick={onClose}
-                className={({ isActive }) => `
-                  flex items-center gap-3 px-4 py-3 rounded-lg font-medium transition-colors
-                  ${
+                className={({ isActive }) =>
+                  `flex items-center gap-3 px-4 py-3 min-h-11 rounded-lg font-medium transition-[background-color,color,transform] duration-150 active:scale-[0.97] focus:outline-none focus-visible:ring-2 focus-visible:ring-maroon-800 ${
                     isActive
                       ? "bg-maroon-50 text-maroon-800"
                       : "text-gray-600 hover:bg-gray-50 hover:text-gray-900"
-                  }
-                `}
+                  }`
+                }
               >
                 {item.icon}
                 {item.label}
@@ -299,8 +334,8 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
           {/* User section */}
           <div className="px-4 py-4 border-t border-gray-100">
             <div className="flex items-center gap-3 px-4 py-2 mb-3">
-              <div className="w-8 h-8 bg-maroon-100 text-maroon-800 rounded-full flex items-center justify-center text-sm font-medium">
-                {user?.email?.[0].toUpperCase() || "A"}
+              <div className="w-8 h-8 bg-maroon-100 text-maroon-800 rounded-full flex items-center justify-center text-sm font-medium shrink-0">
+                {user?.email?.[0]?.toUpperCase() || "A"}
               </div>
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-medium text-gray-900 truncate">
@@ -310,47 +345,23 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
               </div>
             </div>
 
-            {/* Change Password Button */}
             <Button
+              type="button"
               variant="ghost"
               className="w-full justify-start mb-1"
               onClick={() => setShowPasswordModal(true)}
             >
-              <svg
-                className="w-5 h-5"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"
-                />
-              </svg>
+              <KeyIcon className="w-5 h-5" />
               Change Password
             </Button>
 
-            {/* Sign Out Button */}
             <Button
+              type="button"
               variant="ghost"
               className="w-full justify-start"
               onClick={handleSignOut}
             >
-              <svg
-                className="w-5 h-5"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"
-                />
-              </svg>
+              <LogoutIcon className="w-5 h-5" />
               Sign Out
             </Button>
           </div>
@@ -360,81 +371,19 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
       {/* Change Password Modal */}
       <Modal
         isOpen={showPasswordModal}
+        preventClose={isChangingPassword}
         onClose={() => {
           setShowPasswordModal(false);
           resetPasswordForm();
         }}
         title="Change Password"
         size="md"
-      >
-        <div className="space-y-4">
-          {/* Error Message */}
-          {passwordError && (
-            <div className="bg-red-50 border border-red-200 rounded-lg p-3 flex items-start gap-2">
-              <svg
-                className="w-5 h-5 text-red-500 shrink-0 mt-0.5"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-                />
-              </svg>
-              <p className="text-sm text-red-700">{passwordError}</p>
-            </div>
-          )}
-
-          {/* Current Password */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Current Password
-            </label>
-            <input
-              type="password"
-              value={currentPassword}
-              onChange={(e) => setCurrentPassword(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-maroon-500 focus:border-maroon-500"
-              placeholder="Enter current password"
-            />
-          </div>
-
-          {/* New Password */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              New Password
-            </label>
-            <input
-              type="password"
-              value={newPassword}
-              onChange={(e) => setNewPassword(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-maroon-500 focus:border-maroon-500"
-              placeholder="Enter new password"
-            />
-            <p className="mt-1 text-xs text-gray-500">At least 6 characters</p>
-          </div>
-
-          {/* Confirm New Password */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Confirm New Password
-            </label>
-            <input
-              type="password"
-              value={confirmNewPassword}
-              onChange={(e) => setConfirmNewPassword(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-maroon-500 focus:border-maroon-500"
-              placeholder="Confirm new password"
-            />
-          </div>
-
-          {/* Actions */}
-          <div className="flex justify-end gap-3 pt-2">
+        footer={
+          <>
             <Button
+              type="button"
               variant="secondary"
+              disabled={isChangingPassword}
               onClick={() => {
                 setShowPasswordModal(false);
                 resetPasswordForm();
@@ -443,14 +392,70 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
               Cancel
             </Button>
             <Button
-              onClick={handleChangePassword}
+              type="submit"
+              form="admin-change-password-form"
               isLoading={isChangingPassword}
               disabled={!currentPassword || !newPassword || !confirmNewPassword}
             >
-              Change Password
+              {isChangingPassword ? "Updating…" : "Change Password"}
             </Button>
-          </div>
-        </div>
+          </>
+        }
+      >
+        <form
+          id="admin-change-password-form"
+          onSubmit={handleChangePassword}
+          className="space-y-4"
+        >
+          {passwordError && (
+            <div
+              role="alert"
+              className="bg-red-50 border border-red-200 rounded-lg p-3 flex items-start gap-2"
+            >
+              <AlertCircleIcon className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
+              <p className="text-sm text-red-800">{passwordError}</p>
+            </div>
+          )}
+
+          <Input
+            label="Current Password"
+            type="password"
+            value={currentPassword}
+            onChange={(e) => setCurrentPassword(e.target.value)}
+            placeholder="Enter current password"
+            autoComplete="current-password"
+            showPasswordToggle
+            required
+            disabled={isChangingPassword}
+          />
+
+          <Input
+            label="New Password"
+            type="password"
+            value={newPassword}
+            onChange={(e) => setNewPassword(e.target.value)}
+            placeholder="Enter new password"
+            autoComplete="new-password"
+            showPasswordToggle
+            minLength={8}
+            helperText="At least 8 characters and different from your current password."
+            required
+            disabled={isChangingPassword}
+          />
+
+          <Input
+            label="Confirm New Password"
+            type="password"
+            value={confirmNewPassword}
+            onChange={(e) => setConfirmNewPassword(e.target.value)}
+            placeholder="Confirm new password"
+            autoComplete="new-password"
+            showPasswordToggle
+            minLength={8}
+            required
+            disabled={isChangingPassword}
+          />
+        </form>
       </Modal>
     </>
   );
